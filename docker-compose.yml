@@ -1,42 +1,56 @@
-version: '3.8'
 
 services:
   db:
     image: postgres:15-alpine
-    container_name: saveshop_postgres
-    restart: always
+    restart: unless-stopped
+
     environment:
-      POSTGRES_USER: saveshop_user
-      POSTGRES_PASSWORD: saveshop_password
-      POSTGRES_DB: saveshop_db
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
+    # Do not expose PostgreSQL publicly
+    shm_size: 64mb
+
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=30
+      - -c
+      - work_mem=2MB
+
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U saveshop_user -d saveshop_db"]
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: saveshop_api
-    restart: always
+
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
     depends_on:
       db:
         condition: service_healthy
-    environment:
-      - ENVIRONMENT=production
-      - DEBUG=False
-      - DATABASE_URL=postgresql+psycopg2://saveshop_user:saveshop_password@db:5432/saveshop_db
-      - AUTH0_ENABLED=False
-      - SECRET_KEY=production-super-secret-key-32-chars-long!
-      - GOOGLE_TRIGGER_WEBHOOK_SECRET=saveshop-trigger-secret-key
+
+    # Only the VPS itself can access the API directly.
+    # Caddy will forward external HTTPS requests to it.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
 volumes:
   postgres_data:
