@@ -32,7 +32,7 @@ jobs:
             --exclude='.pytest_cache' \
             --exclude='postgres_data' \
             --exclude='*.pyc' \
-            -czf deploy.tar.gz .
+            -czf "$RUNNER_TEMP/deploy.tar.gz" .
 
       - name: Configure SSH
         shell: bash
@@ -59,8 +59,8 @@ jobs:
             -i ~/.ssh/id_ed25519 \
             -P "$VPS_SSH_PORT" \
             -o StrictHostKeyChecking=yes \
-            deploy.tar.gz \
-            "$VPS_USER@$VPS_HOST:/tmp/shop-api-deploy.tar.gz"
+            "$RUNNER_TEMP/deploy.tar.gz" \
+            "$VPS_USER@$VPS_HOST:/tmp/inventory-api-deploy.tar.gz"
 
       - name: Deploy application
         env:
