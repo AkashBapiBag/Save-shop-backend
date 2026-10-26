@@ -30,13 +30,14 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
 )
 
-# CORS Middleware Configuration (Supporting React Native mobile app, Expo web, and LAN IPs)
+# CORS Middleware Configuration (Supporting all origins, Expo Web, React Native, Mobile Apps, and LAN IPs)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https?://.*",
+    allow_origin_regex=r".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 

@@ -17,3 +17,4 @@ coverage==7.17.0
 ruff==0.17.2
 python-dotenv==1.2.4
 google-auth==2.62.0
+requests>=2.31.0
