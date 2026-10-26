@@ -224,3 +224,13 @@ def test_remove_operator_and_revoke_invitation(client: TestClient, admin_headers
     token = login_resp.json()["access_token"]
     stores_resp = client.get("/api/v1/auth/stores", headers={"Authorization": f"Bearer {token}"})
     assert len(stores_resp.json()) == 0
+
+    # Verify owner cannot remove themselves
+    owner_info = client.get("/api/v1/auth/me", headers=admin_headers).json()
+    owner_id = owner_info["user_id"]
+    self_rem_resp = client.delete(
+        f"/api/v1/stores/{store_e_id}/operators/{owner_id}",
+        headers=admin_headers,
+    )
+    assert self_rem_resp.status_code == 400
+    assert "Store owners cannot remove themselves" in self_rem_resp.json()["error"]["message"]

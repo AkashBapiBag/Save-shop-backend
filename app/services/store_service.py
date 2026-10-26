@@ -9,6 +9,7 @@ from app.core.exceptions import (
     EntityNotFoundException,
     ForbiddenException,
     StoreCreationIntegrityException,
+    ValidationException,
 )
 from app.models.store import Store
 from app.models.user import User
@@ -387,6 +388,9 @@ class StoreService:
     def remove_store_operator(
         db: Session, store_id: uuid.UUID, user_id: uuid.UUID, current_user: User
     ) -> bool:
+        if user_id == current_user.user_id:
+            raise ValidationException("Store owners cannot remove themselves from their own store.")
+
         store = StoreService.get_store_by_id(db, store_id)
         user = db.query(User).filter(User.user_id == user_id).first()
         if not user:
