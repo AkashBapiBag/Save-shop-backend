@@ -115,10 +115,7 @@ class AuthService:
         if not user:
             user = db.query(User).filter(User.email == email).first()
 
-        is_admin_email = (
-            email.lower() in [e.lower() for e in settings.ADMIN_EMAILS]
-            or "admin" in email.lower()
-        )
+        is_admin_email = email.lower() in [e.lower() for e in settings.ADMIN_EMAILS]
 
         total_users = db.query(User).count()
         is_first_user = total_users == 0
