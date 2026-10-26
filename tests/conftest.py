@@ -2,6 +2,7 @@ import os
 
 os.environ["ENVIRONMENT"] = "testing"
 os.environ["ENABLE_DEV_DIRECT_LOGIN"] = "true"
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 
 import pytest
 from fastapi.testclient import TestClient
