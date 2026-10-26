@@ -29,9 +29,9 @@ jobs:
 
       - name: Run Pytest Test Suite
         env:
-          ENVIRONMENT: testing
+          ENVIRONMENT: "testing"
           ENABLE_DEV_DIRECT_LOGIN: "true"
-          DATABASE_URL: sqlite:///:memory:
+          DATABASE_URL: "sqlite:///:memory:"
         run: |
           pytest -v
 
