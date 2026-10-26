@@ -25,8 +25,13 @@ jobs:
             cd /var/www/save-shop-backend
             git fetch --all
             git reset --hard origin/${{ github.ref_name }}
+            
+            echo "==> Ensuring persistent production .env link..."
+            ln -sf /etc/saveshop/backend.env /var/www/save-shop-backend/.env
+            
             echo "==> Updating Python dependencies..."
             ./venv/bin/pip install -r requirements.txt
+            
             echo "==> Restarting Save Shop backend service..."
             systemctl restart save-shop-backend
             systemctl is-active save-shop-backend
