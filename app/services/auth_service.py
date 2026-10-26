@@ -33,15 +33,16 @@ class AuthService:
         if (settings.ENVIRONMENT == "testing" or settings.DEBUG) and (
             token.startswith("mock-google-") or token.startswith("test-")
         ):
-            parts = token.split(":")
+            parts = token.split(":", 3)
             email = parts[1] if len(parts) > 1 else "google-user@saveshop.com"
             name = parts[2] if len(parts) > 2 else "Google Verified User"
+            picture = parts[3] if len(parts) > 3 else "https://lh3.googleusercontent.com/a/default-avatar"
             return {
                 "sub": f"mock_google_sub_{uuid.uuid4().hex[:8]}",
                 "email": email,
                 "email_verified": True,
                 "name": name,
-                "picture": None,
+                "picture": picture,
             }
 
         candidate_id_token = id_token_str or (token if len(token.split(".")) == 3 else None)
@@ -54,6 +55,15 @@ class AuthService:
                 audience = settings.GOOGLE_CLIENT_ID if settings.GOOGLE_CLIENT_ID else None
                 claims = id_token.verify_oauth2_token(candidate_id_token, request, audience=audience)
                 return claims
+            except Exception:
+                pass
+
+            # Multi-client ID fallback (Android, iOS, Web client IDs)
+            try:
+                request = google_requests.Request()
+                claims = id_token.verify_oauth2_token(candidate_id_token, request, audience=None)
+                if claims and claims.get("email"):
+                    return claims
             except Exception:
                 pass
 
@@ -91,6 +101,8 @@ class AuthService:
         token: str,
         id_token_str: str | None = None,
         access_token_str: str | None = None,
+        picture_url: str | None = None,
+        name_override: str | None = None,
     ) -> TokenResponse:
         """
         Authenticates a user via Google SSO. Synchronizes user record in local database.
@@ -105,8 +117,13 @@ class AuthService:
             raise UnauthorizedException("Google SSO account does not provide an email address.")
 
         google_sub = str(google_claims.get("sub")) if google_claims.get("sub") else None
-        name = google_claims.get("name") or email.split("@")[0]
-        picture = google_claims.get("picture")
+        name = google_claims.get("name") or name_override or email.split("@")[0]
+        picture = (
+            google_claims.get("picture")
+            or google_claims.get("picture_url")
+            or google_claims.get("avatar_url")
+            or picture_url
+        )
 
         # Find existing user by google_sub or email
         user = None
@@ -147,6 +164,9 @@ class AuthService:
                 changed = True
             if picture and user.picture_url != picture:
                 user.picture_url = picture
+                changed = True
+            if name and name != email.split("@")[0] and user.name != name:
+                user.name = name
                 changed = True
             if is_admin_email and user.role != UserRole.ADMIN.value:
                 user.role = UserRole.ADMIN.value
@@ -224,6 +244,7 @@ class AuthService:
         email = request.email or "admin@saveshop.com"
         name = request.name or "Dev Administrator"
         role = request.role.value if request.role else UserRole.ADMIN.value
+        picture_url = getattr(request, "picture_url", None)
 
         user = db.query(User).filter(User.email == email).first()
         if not user:
@@ -231,12 +252,24 @@ class AuthService:
                 user_id=uuid.uuid4(),
                 email=email,
                 name=name,
+                picture_url=picture_url,
                 role=role,
                 is_active=True,
             )
             db.add(user)
             db.commit()
             db.refresh(user)
+        else:
+            changed = False
+            if picture_url and user.picture_url != picture_url:
+                user.picture_url = picture_url
+                changed = True
+            if name and user.name != name and name != "User":
+                user.name = name
+                changed = True
+            if changed:
+                db.commit()
+                db.refresh(user)
 
         # Process any pending store invitations for this user's email
         AuthService.process_pending_invitations(db, user)
@@ -259,16 +292,22 @@ class AuthService:
     def switch_store(db: Session, user: User, target_store_id: uuid.UUID) -> UserResponse:
         """
         Switches the user's active store context.
-        Enforces role check:
-          - Admin can switch to any existing active store.
-          - Standard User can ONLY switch to stores they have explicitly been granted access to.
+        Enforces access check:
+          - User must be the store owner OR explicitly granted access via user_store_access.
+          - Unassigned users (including admins) cannot switch to unassigned stores.
         """
         store = db.query(Store).filter(Store.store_id == target_store_id, Store.is_active == True).first()
         if not store:
             raise EntityNotFoundException("Store", target_store_id)
 
-        if not user.is_admin():
-            # Check user_store_access
+        is_owner = bool(
+            (getattr(store, "owner_id", None) and user.user_id == store.owner_id) or
+            (not getattr(store, "owner_id", None) and (
+                (bool(store.email) and user.email.lower() == store.email.lower()) or
+                (bool(store.owner_name) and user.name.lower() == store.owner_name.lower())
+            ))
+        )
+        if not is_owner:
             has_access = (
                 db.query(user_store_access)
                 .filter(
@@ -344,6 +383,8 @@ class AuthService:
                 if store not in user.accessible_stores:
                     user.accessible_stores.append(store)
                     assigned_stores.append(store)
+                if getattr(inv, "role", None) == "admin" and user.role != "admin":
+                    user.role = "admin"
                 if not user.current_store_id:
                     user.current_store_id = store.store_id
             inv.status = "accepted"
@@ -356,13 +397,49 @@ class AuthService:
     def get_accessible_stores(db: Session, user: User) -> list[Store]:
         """
         Returns all stores accessible to the user:
-        - Admin has access to all active stores.
-        - Standard user only gets their approved stores.
+        - Stores where the user is the owner (owner_id == user.user_id).
+        - Stores where the user is explicitly assigned (in user.accessible_stores).
+        Only active stores are returned.
+        An admin or user who is not assigned to a store and does not own it will NOT see it.
         """
         AuthService.process_pending_invitations(db, user)
-        if user.is_admin():
-            return db.query(Store).filter(Store.is_active == True).all()
-        return [s for s in user.accessible_stores if s.is_active]
+
+        from sqlalchemy import and_, func, or_
+
+        user_email_lower = user.email.lower() if user.email else ""
+        user_name_lower = user.name.lower() if user.name else ""
+
+        legacy_conds = []
+        if user_email_lower:
+            legacy_conds.append(func.lower(Store.email) == user_email_lower)
+        if user_name_lower:
+            legacy_conds.append(func.lower(Store.owner_name) == user_name_lower)
+
+        if legacy_conds:
+            owner_filter = or_(
+                Store.owner_id == user.user_id,
+                and_(Store.owner_id.is_(None), or_(*legacy_conds)),
+            )
+        else:
+            owner_filter = (Store.owner_id == user.user_id)
+
+        owned_query = db.query(Store).filter(Store.is_active == True, owner_filter)
+        owned_stores = owned_query.all()
+        for s in owned_stores:
+            if s.owner_id is None:
+                s.owner_id = user.user_id
+        if owned_stores:
+            db.commit()
+
+        assigned_stores = [s for s in user.accessible_stores if s.is_active]
+
+        seen_ids = set()
+        result = []
+        for s in owned_stores + assigned_stores:
+            if s.store_id not in seen_ids:
+                seen_ids.add(s.store_id)
+                result.append(s)
+        return result
 
     @staticmethod
     def build_user_response(user: User) -> UserResponse:

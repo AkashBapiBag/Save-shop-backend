@@ -49,6 +49,7 @@ class StoreResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     store_id: UUID
+    owner_id: UUID | None = None
     name: str
     owner_name: str | None = None
     phone_number: str | None = None
@@ -87,6 +88,7 @@ class StoreOperatorResponse(BaseModel):
     name: str
     role: str
     picture_url: str | None = None
+    is_owner: bool = False
     created_at: datetime
 
 
@@ -103,6 +105,7 @@ class StoreInvitationResponse(BaseModel):
 
 class StoreMembersOverviewResponse(BaseModel):
     store_id: UUID
+    owner_id: UUID | None = None
     store_name: str
     operators: list[StoreOperatorResponse] = []
     members: list[StoreOperatorResponse] = []

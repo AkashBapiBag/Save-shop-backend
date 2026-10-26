@@ -69,12 +69,13 @@ class StoreService:
 
         new_store = Store(
             store_id=new_store_id,
+            owner_id=current_user.user_id,
             name=store_in.name,
-            owner_name=store_in.owner_name,
+            owner_name=store_in.owner_name or current_user.name,
             phone_number=store_in.phone_number,
             address=store_in.address,
             state=store_in.state or "19-West Bengal",
-            email=store_in.email,
+            email=store_in.email or current_user.email,
             logo_url=store_in.logo_url,
             logo_data=logo_bytes,
             authorized_signature_data=signature_bytes,
@@ -85,7 +86,7 @@ class StoreService:
         db.commit()
         db.refresh(new_store)
 
-        # Automatically associate admin to the store
+        # Automatically associate creator/admin to the store
         if new_store not in current_user.accessible_stores:
             current_user.accessible_stores.append(new_store)
             if not current_user.current_store_id:
@@ -204,6 +205,7 @@ class StoreService:
     def to_response(store: Store) -> StoreResponse:
         return StoreResponse(
             store_id=store.store_id,
+            owner_id=getattr(store, "owner_id", None),
             name=store.name,
             owner_name=store.owner_name,
             phone_number=store.phone_number,
@@ -227,6 +229,30 @@ class StoreService:
         db: Session, store_id: uuid.UUID, current_user: User
     ) -> dict:
         store = StoreService.get_store_by_id(db, store_id)
+        from sqlalchemy import func
+
+        # Enforce strict 1-owner rule: Ensure store has owner_id
+        if not getattr(store, "owner_id", None):
+            potential_owner = None
+            if store.email:
+                potential_owner = db.query(User).filter(func.lower(User.email) == store.email.strip().lower()).first()
+            if not potential_owner and store.owner_name:
+                potential_owner = db.query(User).filter(func.lower(User.name) == store.owner_name.strip().lower()).first()
+            if potential_owner:
+                store.owner_id = potential_owner.user_id
+                db.commit()
+                db.refresh(store)
+
+        # Ensure the single owner user is in store.users_with_access
+        target_owner_id = getattr(store, "owner_id", None)
+        if target_owner_id:
+            owner_user = db.query(User).filter(User.user_id == target_owner_id).first()
+            if owner_user and owner_user not in store.users_with_access:
+                store.users_with_access.append(owner_user)
+                db.commit()
+                db.refresh(store)
+
+        # STRICT 1-OWNER RULE: Exactly at most ONE operator in the store has is_owner=True
         operators = [
             {
                 "user_id": u.user_id,
@@ -234,10 +260,13 @@ class StoreService:
                 "name": u.name,
                 "role": u.role,
                 "picture_url": getattr(u, "picture_url", None),
+                "is_owner": bool(target_owner_id is not None and u.user_id == target_owner_id),
                 "created_at": u.created_at,
             }
             for u in store.users_with_access
         ]
+        # Sort so that the single owner is ALWAYS the 1st item in the list
+        operators.sort(key=lambda op: 0 if op["is_owner"] else 1)
         from app.models.invitation import StoreInvitation
 
         pending_invitations = (
@@ -262,6 +291,7 @@ class StoreService:
         ]
         return {
             "store_id": store.store_id,
+            "owner_id": getattr(store, "owner_id", None),
             "store_name": store.name,
             "operators": operators,
             "members": operators,
@@ -281,9 +311,21 @@ class StoreService:
         from sqlalchemy import func
         from app.models.invitation import StoreInvitation
 
+        # Check target role - Enforce that a store can only have 1 owner
+        target_role = (role or "user").strip().lower()
+        if target_role == "owner":
+            raise ValidationException("A store can only have 1 owner. Additional staff can only be added as 'admin' or 'user'.")
+
+        target_owner_id = getattr(store, "owner_id", None)
+
         # Check if user already exists
         user = db.query(User).filter(func.lower(User.email) == clean_email).first()
         if user:
+            if target_role == "admin" and user.role != "admin":
+                user.role = "admin"
+
+            is_this_user_owner = bool(target_owner_id is not None and user.user_id == target_owner_id)
+
             # Check if user already has access to this store
             if store in user.accessible_stores:
                 return {
@@ -295,6 +337,7 @@ class StoreService:
                         "name": user.name,
                         "role": user.role,
                         "picture_url": getattr(user, "picture_url", None),
+                        "is_owner": is_this_user_owner,
                         "created_at": user.created_at,
                     },
                     "invitation": None,
@@ -329,6 +372,7 @@ class StoreService:
                     "name": user.name,
                     "role": user.role,
                     "picture_url": getattr(user, "picture_url", None),
+                    "is_owner": is_this_user_owner,
                     "created_at": user.created_at,
                 },
                 "invitation": None,
@@ -345,6 +389,9 @@ class StoreService:
             .first()
         )
         if existing_inv:
+            if target_role and existing_inv.role != target_role:
+                existing_inv.role = target_role
+                db.commit()
             return {
                 "status": "invited",
                 "message": f"An active invitation for '{clean_email}' already exists. They will be added to {store.name} upon signing in.",
@@ -362,7 +409,7 @@ class StoreService:
         new_inv = StoreInvitation(
             store_id=store_id,
             email=clean_email,
-            role=role or "user",
+            role=target_role,
             status="pending",
             invited_by_id=current_user.user_id,
         )
@@ -388,19 +435,44 @@ class StoreService:
     def remove_store_operator(
         db: Session, store_id: uuid.UUID, user_id: uuid.UUID, current_user: User
     ) -> bool:
-        if user_id == current_user.user_id:
-            raise ValidationException("Store owners cannot remove themselves from their own store.")
-
         store = StoreService.get_store_by_id(db, store_id)
         user = db.query(User).filter(User.user_id == user_id).first()
         if not user:
             raise EntityNotFoundException("User", user_id)
 
-        if store in user.accessible_stores:
-            user.accessible_stores.remove(store)
+        # 1. The single store owner cannot be removed from their own store by anyone
+        target_owner_id = getattr(store, "owner_id", None)
+        is_target_store_owner = bool(target_owner_id is not None and user_id == target_owner_id)
+        if not target_owner_id:
+            is_target_store_owner = bool(
+                (bool(store.email) and user.email.lower() == store.email.lower()) or
+                (bool(store.owner_name) and user.name.lower() == store.owner_name.lower())
+            )
+        if is_target_store_owner or user_id == current_user.user_id:
+            raise ValidationException("Store owners cannot remove themselves from their own store.")
+
+        # 2. Only the single store owner can remove administrators
+        is_current_store_owner = bool(target_owner_id is not None and current_user.user_id == target_owner_id)
+        if not target_owner_id:
+            is_current_store_owner = bool(
+                (bool(store.email) and current_user.email.lower() == store.email.lower()) or
+                (bool(store.owner_name) and current_user.name.lower() == store.owner_name.lower())
+            )
+        if user.role == "admin" and not is_current_store_owner:
+            raise ForbiddenException("Only the store owner can remove administrators from this store.")
+
+        matched_stores = [s for s in user.accessible_stores if s.store_id == store.store_id]
+        if matched_stores:
+            for s in matched_stores:
+                user.accessible_stores.remove(s)
             if user.current_store_id == store_id:
                 other_stores = [s for s in user.accessible_stores if s.store_id != store_id and s.is_active]
                 user.current_store_id = other_stores[0].store_id if other_stores else None
+            # If user was promoted to admin by this store invitation, revert role to user if not in ADMIN_EMAILS
+            from app.core.config import settings
+            is_admin_email = user.email.lower() in [e.lower() for e in settings.ADMIN_EMAILS]
+            if not is_admin_email and not user.accessible_stores:
+                user.role = "user"
             db.commit()
         return True
 

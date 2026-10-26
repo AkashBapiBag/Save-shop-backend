@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, Column, LargeBinary, String, Text
+from sqlalchemy import Boolean, Column, ForeignKey, LargeBinary, String, Text
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -11,6 +11,12 @@ class Store(Base, TimestampMixin):
     __tablename__ = "stores"
 
     store_id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(
+        GUID(),
+        ForeignKey("users.user_id", use_alter=True, name="fk_stores_owner_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     name = Column(String(255), unique=True, index=True, nullable=False)
     owner_name = Column(String(255), nullable=True)
     phone_number = Column(String(50), nullable=True)
@@ -24,6 +30,7 @@ class Store(Base, TimestampMixin):
     is_active = Column(Boolean, default=True, nullable=False)
 
     # Relationships
+    owner = relationship("User", foreign_keys=[owner_id])
     users_with_access = relationship(
         "User",
         secondary="user_store_access",

@@ -13,6 +13,8 @@ class LoginRequest(BaseModel):
     google_token: str | None = Field(None, description="Google SSO ID or Access Token")
     # For legacy Auth0 SSO
     auth0_token: str | None = Field(None, description="Auth0 ID or Access Token")
+    # Google / SSO User Profile Overrides
+    picture_url: str | None = Field(None, description="User avatar image URL")
     # For automated test suites / test fixtures
     email: EmailStr | None = Field(None, description="Test email for mock login")
     name: str | None = Field("User", description="Display name for user")

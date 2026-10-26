@@ -43,6 +43,8 @@ def login(
             token=token,
             id_token_str=login_in.id_token,
             access_token_str=login_in.access_token,
+            picture_url=login_in.picture_url,
+            name_override=login_in.name if login_in.name and login_in.name != "User" else None,
         )
 
     # 2. Legacy Auth0 SSO token exchange if present
@@ -81,6 +83,8 @@ def google_sso_login(
         token=token,
         id_token_str=login_in.id_token,
         access_token_str=login_in.access_token,
+        picture_url=login_in.picture_url,
+        name_override=login_in.name if login_in.name and login_in.name != "User" else None,
     )
 
 

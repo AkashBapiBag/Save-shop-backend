@@ -99,3 +99,29 @@ def test_user_store_switching_restriction(client: TestClient, admin_headers: dic
     )
     assert switch_ok.status_code == 200
     assert switch_ok.json()["current_store_id"] == s2_id
+
+
+def test_google_sso_profile_picture_and_sync(client: TestClient):
+    # Test Google SSO token exchange with profile picture and sync
+    avatar_url = "https://lh3.googleusercontent.com/a/sample-avatar-123"
+    resp = client.post(
+        "/api/v1/auth/login",
+        json={
+            "google_token": f"mock-google-token:akash@saveshop.com:Akash Bag:{avatar_url}",
+            "picture_url": avatar_url,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["user"]["email"] == "akash@saveshop.com"
+    assert data["user"]["name"] == "Akash Bag"
+    assert data["user"]["picture_url"] == avatar_url
+
+    # Check that /api/v1/auth/me also returns the profile picture
+    token = data["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    me_resp = client.get("/api/v1/auth/me", headers=headers)
+    assert me_resp.status_code == 200
+    me_data = me_resp.json()
+    assert me_data["picture_url"] == avatar_url
+    assert me_data["name"] == "Akash Bag"

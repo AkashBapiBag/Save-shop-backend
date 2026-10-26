@@ -93,17 +93,21 @@ def test_get_current_active_user_inactive():
 
 
 def test_verify_user_store_access(db_session: Session):
-    store_id = uuid.uuid4()
-    store = Store(store_id=store_id, name="Access Test Store")
-    db_session.add(store)
-
-    admin = User(user_id=uuid.uuid4(), email="adm@test.com", name="Admin", role=UserRole.ADMIN.value)
+    admin_id = uuid.uuid4()
+    admin = User(user_id=admin_id, email="adm@test.com", name="Admin", role=UserRole.ADMIN.value)
     clerk = User(user_id=uuid.uuid4(), email="clk@test.com", name="Clerk", role=UserRole.USER.value)
-    db_session.add_all([admin, clerk])
+    unassigned_admin = User(user_id=uuid.uuid4(), email="unassigned@test.com", name="Unassigned Admin", role=UserRole.ADMIN.value)
+
+    store_id = uuid.uuid4()
+    store = Store(store_id=store_id, name="Access Test Store", owner_id=admin_id)
+    db_session.add_all([store, admin, clerk, unassigned_admin])
     db_session.commit()
 
-    # Admin always has access
+    # Store owner (admin) has access
     assert verify_user_store_access(db_session, admin, store_id) is True
+
+    # Unassigned admin does NOT have access to store they don't own or belong to
+    assert verify_user_store_access(db_session, unassigned_admin, store_id) is False
 
     # Clerk before assignment -> False
     assert verify_user_store_access(db_session, clerk, store_id) is False

@@ -61,6 +61,9 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
 
+    is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+    owner_col_def = "owner_id CHAR(36)" if is_sqlite else "owner_id UUID"
+
     # Safe migration for new columns on existing database
     migrations = [
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS total_cashback_amount NUMERIC(12, 2) DEFAULT 0.00 NOT NULL;",
@@ -71,12 +74,12 @@ def init_db() -> None:
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS received_amount NUMERIC(12, 2) DEFAULT 0.00 NOT NULL;",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS balance_amount NUMERIC(12, 2) DEFAULT 0.00 NOT NULL;",
         "ALTER TABLE stores ADD COLUMN IF NOT EXISTS state VARCHAR(100) DEFAULT '19-West Bengal' NOT NULL;",
+        f"ALTER TABLE stores ADD COLUMN IF NOT EXISTS {owner_col_def};",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS invoice_seq INTEGER;",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub VARCHAR(255);",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS picture_url VARCHAR(500);",
     ]
 
-    is_sqlite = settings.DATABASE_URL.startswith("sqlite")
     with engine.begin() as conn:
         for stmt in migrations:
             try:
@@ -88,6 +91,12 @@ def init_db() -> None:
                     conn.execute(text(stmt))
             except Exception:
                 # Column likely already exists
+                pass
+
+        if not is_sqlite:
+            try:
+                conn.execute(text("ALTER TABLE stores ALTER COLUMN owner_id TYPE UUID USING owner_id::uuid;"))
+            except Exception:
                 pass
 
         try:
@@ -114,6 +123,30 @@ def init_db() -> None:
                         if not tx.invoice_number or tx.invoice_number.startswith("INV-20"):
                             tx.invoice_number = f"INV-{idx:05d}"
                 db.commit()
+        except Exception:
+            db.rollback()
+
+    # Backfill missing owner_id on existing stores if empty
+    from app.models.store import Store
+    from app.models.user import User
+
+    with SessionLocal() as db:
+        try:
+            stores_without_owner = db.query(Store).filter(Store.owner_id.is_(None)).all()
+            for st in stores_without_owner:
+                matched_user = None
+                if st.email:
+                    matched_user = db.query(User).filter(User.email == st.email).first()
+                if not matched_user and st.owner_name:
+                    matched_user = db.query(User).filter(User.name == st.owner_name).first()
+                if not matched_user and st.users_with_access:
+                    admin_user = next((u for u in st.users_with_access if u.is_admin()), None)
+                    matched_user = admin_user or st.users_with_access[0]
+                if matched_user:
+                    st.owner_id = matched_user.user_id
+                    if matched_user not in st.users_with_access:
+                        st.users_with_access.append(matched_user)
+            db.commit()
         except Exception:
             db.rollback()
 

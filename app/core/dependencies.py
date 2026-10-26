@@ -99,8 +99,15 @@ def get_current_store_context(
     if not store:
         raise EntityNotFoundException("Store", target_id)
 
-    # Authorization verification
-    if not current_user.is_admin():
+    # Authorization verification: Check if current_user has access to target_id (must be owner or assigned)
+    is_owner = bool(
+        (getattr(store, "owner_id", None) and current_user.user_id == store.owner_id) or
+        (not getattr(store, "owner_id", None) and (
+            (bool(store.email) and current_user.email.lower() == store.email.lower()) or
+            (bool(store.owner_name) and current_user.name.lower() == store.owner_name.lower())
+        ))
+    )
+    if not is_owner:
         has_access = (
             db.query(user_store_access)
             .filter(
@@ -118,9 +125,20 @@ def get_current_store_context(
 def verify_user_store_access(db: Session, user: User, store_id: uuid.UUID) -> bool:
     """
     Checks if a user has access rights to a specific store tenant.
-    Admins have global tenant authority; standard users require explicit assignment.
+    A user has access if they are the store owner, or if they have explicit assignment via user_store_access.
+    Unassigned admins or users without ownership are denied access.
     """
-    if user.is_admin():
+    store = db.query(Store).filter(Store.store_id == store_id).first()
+    if not store:
+        return False
+    if getattr(store, "owner_id", None) and user.user_id == store.owner_id:
+        return True
+    if not getattr(store, "owner_id", None) and (
+        (bool(store.email) and user.email.lower() == store.email.lower()) or
+        (bool(store.owner_name) and user.name.lower() == store.owner_name.lower())
+    ):
+        store.owner_id = user.user_id
+        db.commit()
         return True
     has_access = (
         db.query(user_store_access)
