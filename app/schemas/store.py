@@ -77,3 +77,46 @@ class SignatureResponse(BaseModel):
     store_id: UUID
     has_signature: bool
     signature_base64: str | None = None
+
+
+class StoreOperatorResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: UUID
+    email: EmailStr
+    name: str
+    role: str
+    picture_url: str | None = None
+    created_at: datetime
+
+
+class StoreInvitationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    invitation_id: UUID
+    store_id: UUID
+    email: EmailStr
+    role: str
+    status: str
+    created_at: datetime
+
+
+class StoreMembersOverviewResponse(BaseModel):
+    store_id: UUID
+    store_name: str
+    operators: list[StoreOperatorResponse] = []
+    members: list[StoreOperatorResponse] = []
+    invitations: list[StoreInvitationResponse] = []
+
+
+class AddStoreOperatorRequest(BaseModel):
+    email: EmailStr = Field(..., description="Email address of the user or operator to add")
+    role: str | None = Field("user", description="Role to assign (default: user)")
+
+
+class AddStoreOperatorResponse(BaseModel):
+    status: str = Field(..., description="'assigned' or 'invited'")
+    message: str
+    operator: StoreOperatorResponse | None = None
+    invitation: StoreInvitationResponse | None = None
+

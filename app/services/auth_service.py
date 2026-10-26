@@ -163,6 +163,9 @@ class AuthService:
                 db.commit()
                 db.refresh(user)
 
+        # Process any pending store invitations for this user's email
+        AuthService.process_pending_invitations(db, user)
+
         # Issue internal JWT token for session
         token_data = {
             "sub": str(user.user_id),
@@ -213,6 +216,7 @@ class AuthService:
                 user.role = UserRole.ADMIN.value
                 db.commit()
                 db.refresh(user)
+        AuthService.process_pending_invitations(db, user)
         return user
 
     @staticmethod
@@ -236,6 +240,9 @@ class AuthService:
             db.add(user)
             db.commit()
             db.refresh(user)
+
+        # Process any pending store invitations for this user's email
+        AuthService.process_pending_invitations(db, user)
 
         # Generate internal JWT
         token_data = {
@@ -312,15 +319,53 @@ class AuthService:
         return True
 
     @staticmethod
+    def process_pending_invitations(db: Session, user: User) -> list[Store]:
+        """
+        Checks if there are any pending store invitations matching user's email.
+        If so, adds user to those stores and marks invitations as accepted.
+        If user has no current_store_id, sets it to the first assigned store.
+        """
+        from sqlalchemy import func
+        from app.models.invitation import StoreInvitation
+
+        pending_invites = (
+            db.query(StoreInvitation)
+            .filter(
+                func.lower(StoreInvitation.email) == user.email.lower(),
+                StoreInvitation.status == "pending",
+            )
+            .all()
+        )
+
+        if not pending_invites:
+            return []
+
+        assigned_stores = []
+        for inv in pending_invites:
+            store = db.query(Store).filter(Store.store_id == inv.store_id, Store.is_active == True).first()
+            if store:
+                if store not in user.accessible_stores:
+                    user.accessible_stores.append(store)
+                    assigned_stores.append(store)
+                if not user.current_store_id:
+                    user.current_store_id = store.store_id
+            inv.status = "accepted"
+
+        db.commit()
+        db.refresh(user)
+        return assigned_stores
+
+    @staticmethod
     def get_accessible_stores(db: Session, user: User) -> list[Store]:
         """
         Returns all stores accessible to the user:
         - Admin has access to all active stores.
         - Standard user only gets their approved stores.
         """
+        AuthService.process_pending_invitations(db, user)
         if user.is_admin():
             return db.query(Store).filter(Store.is_active == True).all()
-        return user.accessible_stores
+        return [s for s in user.accessible_stores if s.is_active]
 
     @staticmethod
     def build_user_response(user: User) -> UserResponse:

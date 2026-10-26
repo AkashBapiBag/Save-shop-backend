@@ -7,11 +7,15 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_active_user, require_admin, verify_user_store_access
 from app.core.exceptions import ForbiddenException
 from app.models.user import User
+from app.schemas.common import APIResponse
 from app.schemas.store import (
+    AddStoreOperatorRequest,
+    AddStoreOperatorResponse,
     IndianStateResponse,
     SignatureResponse,
     SignatureUploadRequest,
     StoreCreate,
+    StoreMembersOverviewResponse,
     StoreResponse,
     StoreUpdate,
 )
@@ -162,3 +166,89 @@ def get_signature(
         has_signature=store.authorized_signature_data is not None,
         signature_base64=sig_b64,
     )
+
+
+@router.get(
+    "/{store_id}/operators",
+    response_model=StoreMembersOverviewResponse,
+    summary="Get Store Operators and Pending Invitations",
+)
+def get_store_operators(
+    store_id: uuid.UUID,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns lists of currently assigned operators and pending invitations for a store.
+    """
+    if not verify_user_store_access(db, current_user, store_id):
+        raise ForbiddenException(f"You do not have access to manage store {store_id}.")
+    data = StoreService.get_store_members_and_invitations(db, store_id, current_user)
+    return StoreMembersOverviewResponse(**data)
+
+
+@router.post(
+    "/{store_id}/operators",
+    response_model=AddStoreOperatorResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Add Operator to Store by Email (or Invite if Not Registered)",
+)
+def add_store_operator(
+    store_id: uuid.UUID,
+    payload: AddStoreOperatorRequest,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Adds an operator to the store by email address.
+    If the user has already registered, they are granted access immediately.
+    If the user has not logged in yet, a pending invitation is created and
+    they will be automatically linked to this store when they sign in.
+    """
+    if not verify_user_store_access(db, current_user, store_id):
+        raise ForbiddenException(f"You do not have access to manage store {store_id}.")
+    res = StoreService.add_store_operator_by_email(
+        db, store_id, payload.email, payload.role, current_user
+    )
+    return AddStoreOperatorResponse(**res)
+
+
+@router.delete(
+    "/{store_id}/operators/{user_id}",
+    response_model=APIResponse[dict],
+    summary="Remove Operator from Store",
+)
+def remove_store_operator(
+    store_id: uuid.UUID,
+    user_id: uuid.UUID,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Removes a standard operator's access to the specified store.
+    """
+    if not verify_user_store_access(db, current_user, store_id):
+        raise ForbiddenException(f"You do not have access to manage store {store_id}.")
+    StoreService.remove_store_operator(db, store_id, user_id, current_user)
+    return APIResponse(message="Operator access removed from store.")
+
+
+@router.delete(
+    "/{store_id}/invitations/{invitation_id}",
+    response_model=APIResponse[dict],
+    summary="Revoke Pending Store Invitation",
+)
+def revoke_store_invitation(
+    store_id: uuid.UUID,
+    invitation_id: uuid.UUID,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Cancels or revokes an outstanding pending operator invitation.
+    """
+    if not verify_user_store_access(db, current_user, store_id):
+        raise ForbiddenException(f"You do not have access to manage store {store_id}.")
+    StoreService.revoke_store_invitation(db, store_id, invitation_id, current_user)
+    return APIResponse(message="Invitation revoked successfully.")
+

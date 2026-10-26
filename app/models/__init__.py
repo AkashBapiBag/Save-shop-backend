@@ -6,6 +6,7 @@ from app.models.notification import (
     NotificationEvent,
     NotificationLog,
 )
+from app.models.invitation import StoreInvitation
 from app.models.state import IndianState
 from app.models.store import Store
 from app.models.transaction import (
@@ -25,6 +26,7 @@ __all__ = [
     "UserRole",
     "user_store_access",
     "Store",
+    "StoreInvitation",
     "IndianState",
     "Product",
     "Batch",

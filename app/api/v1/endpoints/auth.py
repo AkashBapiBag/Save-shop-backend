@@ -91,10 +91,12 @@ def google_sso_login(
 )
 def get_current_user_profile(
     current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
 ):
     """
     Returns the currently authenticated user's profile, role, and active store.
     """
+    AuthService.process_pending_invitations(db, current_user)
     return AuthService.build_user_response(current_user)
 
 
@@ -142,7 +144,17 @@ def assign_store_access(
     db: Session = Depends(get_db),
 ):
     """
-    Admin grants a Standard User access to a specific store.
+    Admin grants a Standard User access to a specific store by user_id or email.
     """
-    AuthService.assign_user_to_store(db, payload.user_id, payload.store_id)
-    return APIResponse(message="Store access successfully assigned to user.")
+    if payload.email:
+        res = StoreService.add_store_operator_by_email(
+            db, payload.store_id, payload.email, "user", current_user
+        )
+        return APIResponse(message=res["message"], data={"status": res["status"]})
+    elif payload.user_id:
+        AuthService.assign_user_to_store(db, payload.user_id, payload.store_id)
+        return APIResponse(message="Store access successfully assigned to user.", data={"status": "assigned"})
+    else:
+        from app.core.exceptions import BadRequestException
+
+        raise BadRequestException("Either user_id or email must be provided.")

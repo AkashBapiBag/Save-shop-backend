@@ -43,5 +43,6 @@ class StoreSwitchRequest(BaseModel):
 
 
 class AssignStoreRequest(BaseModel):
-    user_id: UUID = Field(..., description="Standard user ID to grant store access to")
+    user_id: UUID | None = Field(None, description="Standard user ID to grant store access to")
+    email: EmailStr | None = Field(None, description="Standard user email to grant store access to")
     store_id: UUID = Field(..., description="Store ID")

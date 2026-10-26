@@ -7,15 +7,24 @@ from app.core.config import settings
 
 # Engine configuration
 connect_args = {}
+engine_kwargs = {
+    "pool_pre_ping": True,
+    "echo": False,
+}
+
 if settings.DATABASE_URL.startswith("sqlite"):
     connect_args["check_same_thread"] = False
+else:
+    # High-concurrency production connection pool tuning for PostgreSQL
+    engine_kwargs.update({
+        "pool_size": 20,       # Persistent pool of active connections per uvicorn worker
+        "max_overflow": 10,    # Temporary surge connections during heavy traffic spikes
+        "pool_timeout": 10,    # Maximum seconds to wait for a free connection
+        "pool_recycle": 1800,  # Recycle connection after 30 mins to clean up RAM & OS resources
+    })
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True,
-    echo=False,
-)
+engine_kwargs["connect_args"] = connect_args
+engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -25,7 +34,8 @@ Base = declarative_base()
 def get_db() -> Generator[Session, None, None]:
     """
     FastAPI dependency yielding an atomic database session.
-    Automatically commits on normal completion or rolls back on unhandled error.
+    Ensures any open transaction is cleanly rolled back before returning the
+    connection to the pool, preventing 'idle in transaction' connection/RAM leaks.
     """
     db = SessionLocal()
     try:
@@ -34,6 +44,11 @@ def get_db() -> Generator[Session, None, None]:
         db.rollback()
         raise
     finally:
+        try:
+            if db.is_active:
+                db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

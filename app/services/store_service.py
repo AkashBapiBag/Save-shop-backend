@@ -220,3 +220,204 @@ class StoreService:
             created_at=store.created_at,
             updated_at=store.updated_at,
         )
+
+    @staticmethod
+    def get_store_members_and_invitations(
+        db: Session, store_id: uuid.UUID, current_user: User
+    ) -> dict:
+        store = StoreService.get_store_by_id(db, store_id)
+        operators = [
+            {
+                "user_id": u.user_id,
+                "email": u.email,
+                "name": u.name,
+                "role": u.role,
+                "picture_url": getattr(u, "picture_url", None),
+                "created_at": u.created_at,
+            }
+            for u in store.users_with_access
+        ]
+        from app.models.invitation import StoreInvitation
+
+        pending_invitations = (
+            db.query(StoreInvitation)
+            .filter(
+                StoreInvitation.store_id == store_id,
+                StoreInvitation.status == "pending",
+            )
+            .order_by(StoreInvitation.created_at.desc())
+            .all()
+        )
+        invitations = [
+            {
+                "invitation_id": inv.invitation_id,
+                "store_id": inv.store_id,
+                "email": inv.email,
+                "role": inv.role,
+                "status": inv.status,
+                "created_at": inv.created_at,
+            }
+            for inv in pending_invitations
+        ]
+        return {
+            "store_id": store.store_id,
+            "store_name": store.name,
+            "operators": operators,
+            "members": operators,
+            "invitations": invitations,
+        }
+
+    @staticmethod
+    def add_store_operator_by_email(
+        db: Session,
+        store_id: uuid.UUID,
+        email: str,
+        role: str | None,
+        current_user: User,
+    ) -> dict:
+        store = StoreService.get_store_by_id(db, store_id)
+        clean_email = email.strip().lower()
+        from sqlalchemy import func
+        from app.models.invitation import StoreInvitation
+
+        # Check if user already exists
+        user = db.query(User).filter(func.lower(User.email) == clean_email).first()
+        if user:
+            # Check if user already has access to this store
+            if store in user.accessible_stores:
+                return {
+                    "status": "assigned",
+                    "message": f"User '{user.email}' is already an operator of {store.name}.",
+                    "operator": {
+                        "user_id": user.user_id,
+                        "email": user.email,
+                        "name": user.name,
+                        "role": user.role,
+                        "picture_url": getattr(user, "picture_url", None),
+                        "created_at": user.created_at,
+                    },
+                    "invitation": None,
+                }
+
+            user.accessible_stores.append(store)
+            if not user.current_store_id:
+                user.current_store_id = store.store_id
+
+            # Update any pending invitations to accepted
+            pending_invs = (
+                db.query(StoreInvitation)
+                .filter(
+                    StoreInvitation.store_id == store_id,
+                    func.lower(StoreInvitation.email) == clean_email,
+                    StoreInvitation.status == "pending",
+                )
+                .all()
+            )
+            for pi in pending_invs:
+                pi.status = "accepted"
+
+            db.commit()
+            db.refresh(user)
+
+            return {
+                "status": "assigned",
+                "message": f"User '{user.email}' successfully added to {store.name}.",
+                "operator": {
+                    "user_id": user.user_id,
+                    "email": user.email,
+                    "name": user.name,
+                    "role": user.role,
+                    "picture_url": getattr(user, "picture_url", None),
+                    "created_at": user.created_at,
+                },
+                "invitation": None,
+            }
+
+        # User does not exist yet -> Create or reuse pending invitation
+        existing_inv = (
+            db.query(StoreInvitation)
+            .filter(
+                StoreInvitation.store_id == store_id,
+                func.lower(StoreInvitation.email) == clean_email,
+                StoreInvitation.status == "pending",
+            )
+            .first()
+        )
+        if existing_inv:
+            return {
+                "status": "invited",
+                "message": f"An active invitation for '{clean_email}' already exists. They will be added to {store.name} upon signing in.",
+                "operator": None,
+                "invitation": {
+                    "invitation_id": existing_inv.invitation_id,
+                    "store_id": existing_inv.store_id,
+                    "email": existing_inv.email,
+                    "role": existing_inv.role,
+                    "status": existing_inv.status,
+                    "created_at": existing_inv.created_at,
+                },
+            }
+
+        new_inv = StoreInvitation(
+            store_id=store_id,
+            email=clean_email,
+            role=role or "user",
+            status="pending",
+            invited_by_id=current_user.user_id,
+        )
+        db.add(new_inv)
+        db.commit()
+        db.refresh(new_inv)
+
+        return {
+            "status": "invited",
+            "message": f"Invitation created for '{clean_email}'. When this user logs into Save Shop, they will automatically be assigned to {store.name}.",
+            "operator": None,
+            "invitation": {
+                "invitation_id": new_inv.invitation_id,
+                "store_id": new_inv.store_id,
+                "email": new_inv.email,
+                "role": new_inv.role,
+                "status": new_inv.status,
+                "created_at": new_inv.created_at,
+            },
+        }
+
+    @staticmethod
+    def remove_store_operator(
+        db: Session, store_id: uuid.UUID, user_id: uuid.UUID, current_user: User
+    ) -> bool:
+        store = StoreService.get_store_by_id(db, store_id)
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if not user:
+            raise EntityNotFoundException("User", user_id)
+
+        if store in user.accessible_stores:
+            user.accessible_stores.remove(store)
+            if user.current_store_id == store_id:
+                other_stores = [s for s in user.accessible_stores if s.store_id != store_id and s.is_active]
+                user.current_store_id = other_stores[0].store_id if other_stores else None
+            db.commit()
+        return True
+
+    @staticmethod
+    def revoke_store_invitation(
+        db: Session, store_id: uuid.UUID, invitation_id: uuid.UUID, current_user: User
+    ) -> bool:
+        from app.models.invitation import StoreInvitation
+
+        inv = (
+            db.query(StoreInvitation)
+            .filter(
+                StoreInvitation.invitation_id == invitation_id,
+                StoreInvitation.store_id == store_id,
+            )
+            .first()
+        )
+        if not inv:
+            raise EntityNotFoundException("StoreInvitation", invitation_id)
+
+        db.delete(inv)
+        db.commit()
+        return True
+
