@@ -2,7 +2,7 @@
 
 > **Author**: Antigravity Pair Programming  
 > **Last Updated**: October 2026  
-> **Platform**: Ubuntu 24.04 LTS (Proxmox NAT LXC Container)  
+> **Platform**: Ubuntu 24.04 LTS (Proxmox NAT LXC Container / Standard KVM VPS)  
 > **Status**: Production Live & Fully Automated CI/CD  
 
 ---
@@ -19,7 +19,7 @@
                       ┌───────────────────────────────────────┐
                       │    Cloudflare Edge / Quick Tunnel     │
                       └───────────────────┬───────────────────┘
-                                          │ Encrypted Tunnel
+                                          │ Encrypted Outbound Tunnel
                                           ▼
                       ┌───────────────────────────────────────┐
                       │        VPS (148.113.9.217:20016)       │
@@ -50,27 +50,27 @@
 ```
 
 ### Why this architecture?
-1. **Zero Domain / NAT Bypass**: The VPS sits behind a NAT internal IP (`10.10.10.18`) where public ports 80/443 are blocked by the provider. Cloudflare Tunnel creates an outbound persistent TLS tunnel, delivering **valid HTTPS with automated SSL renewal** without requiring a purchased domain or inbound port forwarding.
-2. **Unified Single-Origin Routing**: Nginx serves the React/Expo Web SPA bundle on `/` and reverse-proxies `/api/` to FastAPI. This eliminates browser CORS issues, cookie security restrictions, and hardcoded origin problems on the web.
-3. **Low-RAM Stability**: Configured virtual memory, lightweight uvicorn workers, and automated watchdog scripts ensure the system remains stable on a 1GB RAM budget.
+1. **Zero Domain / NAT Bypass**: The VPS sits behind an internal NAT IP (`10.10.10.18`) where standard public ports 80/443 are blocked by the provider. Cloudflare Tunnel creates an outbound persistent TLS tunnel, delivering **valid HTTPS with automated SSL renewal** without requiring a purchased domain or inbound router port forwarding.
+2. **Unified Single-Origin Routing**: Nginx serves the React/Expo Web SPA bundle on `/` and reverse-proxies `/api/` to FastAPI on the same port. This eliminates browser CORS preflight overhead, cookie security restrictions, and hardcoded origin problems on the web.
+3. **Low-RAM Stability**: Configured virtual memory, lightweight uvicorn workers, and an automated watchdog script ensure the system runs smoothly on a 1GB RAM budget.
 
 ---
 
 ## 2. Server Specifications & Production Credentials
 
-| Parameter | Production Value |
-| :--- | :--- |
-| **Host IP** | `148.113.9.217` |
-| **SSH Port** | `20016` |
-| **SSH User** | `root` |
-| **Internal IP** | `10.10.10.18` (NAT Container) |
-| **PostgreSQL Version** | PostgreSQL 16 |
-| **PostgreSQL DB Name** | `saveshop_db` |
-| **PostgreSQL User** | `saveshop_user` |
-| **PostgreSQL Password** | `SaveShopPass_9217_Secure!` |
-| **PostgreSQL Port** | `5432` |
-| **Live Web App URL** | `https://chamber-golf-guardian-thumbnails.trycloudflare.com/` |
-| **Backend API Docs** | `https://chamber-golf-guardian-thumbnails.trycloudflare.com/docs` |
+| Parameter | Production Value | Description |
+| :--- | :--- | :--- |
+| **Host IP** | `148.113.9.217` | Public VPS Gateway IP |
+| **SSH Port** | `20016` | Mapped SSH Port (internal port 22) |
+| **SSH User** | `root` | Root administrator |
+| **Internal IP** | `10.10.10.18` | Private NAT Container IP |
+| **PostgreSQL Version** | PostgreSQL 16 | Relational database engine |
+| **PostgreSQL DB Name** | `saveshop_db` | Application database |
+| **PostgreSQL User** | `saveshop_user` | Application database user |
+| **PostgreSQL Password** | `SaveShopPass_9217_Secure!` | Application database password |
+| **PostgreSQL Port** | `5432` | Standard PostgreSQL port |
+| **Live Web App URL** | `https://chamber-golf-guardian-thumbnails.trycloudflare.com/` | Public HTTPS Web App |
+| **Backend API Docs** | `https://chamber-golf-guardian-thumbnails.trycloudflare.com/docs` | Swagger / OpenAPI Explorer |
 
 ---
 
@@ -80,7 +80,8 @@
 /etc/saveshop/
 ├── backend.env               <-- Production backend secrets (chmod 600, root only)
 ├── frontend.env              <-- Production frontend secrets (chmod 600, root only)
-└── current_tunnel_url.txt    <-- Active Cloudflare Tunnel URL
+├── current_tunnel_url.txt    <-- Active Cloudflare Tunnel URL
+└── DEPLOYMENT_GUIDE.md       <-- Exact copy of this operations manual
 
 /var/www/
 ├── save-shop-backend/        <-- FastAPI application repository
@@ -90,31 +91,39 @@
 └── save-shop-frontend/
     └── dist/                 <-- Exported React/Expo Web static production build
 
+/var/log/
+├── saveshop/
+│   ├── backend.log           <-- Real-time HTTP access & status code logs
+│   └── backend-error.log     <-- Error stack traces and 500 exceptions
+├── saveshop-startup.log      <-- Auto-recovery watchdog history
+└── cloudflared.log           <-- Cloudflare tunnel status & assigned URLs
+
 /etc/systemd/system/
 ├── save-shop-backend.service <-- Backend systemd service
 └── saveshop-startup.service  <-- Server boot & recovery watchdog service
 
 /usr/local/bin/
 ├── cloudflared               <-- Cloudflare tunnel binary
-└── saveshop-startup.sh       <-- Auto-recovery watchdog script
+├── saveshop-startup.sh       <-- Auto-recovery watchdog script
+└── saveshop-logs             <-- Interactive CLI log viewer & cleaner
 ```
 
 ---
 
 ## 4. Complete Step-by-Step Server Setup (Replication Guide)
 
-Follow these exact steps if provisioning a fresh Ubuntu VPS from scratch:
+Follow these exact steps in order when provisioning a fresh Ubuntu VPS from scratch:
 
 ### Step 1: Base System Update & Essential Tools
 ```bash
 # Update package repositories and upgrade existing packages
 apt update && apt upgrade -y
 
-# Install required build tools, networking utilities, and git
-apt install -y curl wget git build-essential software-properties-common nginx ufw
+# Install required build tools, networking utilities, git, and logrotate
+apt install -y curl wget git build-essential software-properties-common nginx ufw logrotate
 ```
 
-### Step 2: Fix IPv6 DNS Resolution Delay (Critical for Google Auth & APIs)
+### Step 2: Fix IPv6 DNS Resolution Delay (Critical for Google Auth & External APIs)
 Unroutable IPv6 interfaces cause 20+ second delays when contacting Google SSO or GitHub APIs. Force IPv4 precedence:
 ```bash
 echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
@@ -129,7 +138,7 @@ apt install -y postgresql postgresql-contrib
 systemctl enable postgresql
 systemctl start postgresql
 
-# Create dedicated database and secure application user
+# Create dedicated database and application user
 sudo -u postgres psql << 'EOF'
 CREATE DATABASE saveshop_db;
 CREATE USER saveshop_user WITH ENCRYPTED PASSWORD 'SaveShopPass_9217_Secure!';
@@ -151,11 +160,12 @@ EOF
    systemctl restart postgresql
    ```
 3. **Connect in pgAdmin**:
-   - **Recommended & Secure**: In pgAdmin > Register Server > Connection: `Host: localhost`, `Port: 5432`, `Maintenance Database: saveshop_db`, `Username: saveshop_user`. In the **SSH Tunnel** tab: `SSH Host: 148.113.9.217`, `Port: 20016`, `Username: root`.
+   - In pgAdmin > Register Server > Connection tab: `Host: localhost`, `Port: 5432`, `Maintenance Database: saveshop_db`, `Username: saveshop_user`.
+   - In the **SSH Tunnel** tab: `SSH Host: 148.113.9.217`, `Port: 20016`, `Username: root`, `Password: _hJYJKvJTnmzJvpk` (or SSH Key).
 
 ### Step 4: Python 3.12 & Backend Application Setup
 ```bash
-# Install Python 3.12, venv, and dev headers
+# Install Python 3.12, venv, and PostgreSQL dev headers
 apt install -y python3 python3-pip python3-venv libpq-dev
 
 # Clone backend repository
@@ -171,7 +181,7 @@ python3 -m venv venv
 
 ### Step 5: Secure Environment Files Setup
 ```bash
-# Create protected directory
+# Create protected configuration directory
 mkdir -p /etc/saveshop
 chmod 700 /etc/saveshop
 
@@ -193,13 +203,62 @@ ENABLE_DEV_DIRECT_LOGIN=False
 EOF
 chmod 600 /etc/saveshop/backend.env
 
+# Create persistent production frontend environment record
+cat << 'EOF' > /etc/saveshop/frontend.env
+EXPO_PUBLIC_API_URL=https://chamber-golf-guardian-thumbnails.trycloudflare.com
+EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=898498745806-g40fimuhq99o7aohltn4qqinpvog31d5.apps.googleusercontent.com
+EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID=898498745806-gnrm36ifk3qoek9et2ej5o6ajrrc1bbm.apps.googleusercontent.com
+EOF
+chmod 600 /etc/saveshop/frontend.env
+
 # Symlink .env in the backend folder
 ln -sf /etc/saveshop/backend.env /var/www/save-shop-backend/.env
 ```
 
-### Step 6: Create Backend Systemd Service
-Create `/etc/systemd/system/save-shop-backend.service`:
-```ini
+### Step 6: Initialize Database Tables & Seed Primary Store
+> [!IMPORTANT]
+> A newly initialized database has 0 stores. Because the application requires an active store context to serve inventory, billing, and dashboard endpoints, you must seed an initial store and assign it to the admin user:
+
+```bash
+cd /var/www/save-shop-backend
+./venv/bin/python -c "
+from app.core.database import SessionLocal, init_db
+from app.models.store import Store
+import uuid
+
+# 1. Initialize tables & migrations automatically
+init_db()
+
+# 2. Seed primary store if empty
+db = SessionLocal()
+if db.query(Store).count() == 0:
+    store = Store(
+        store_id=uuid.UUID('beda5c97-562e-4634-b921-b5f66b4c129c'),
+        name='Save Shop Main Store',
+        owner_name='Akash Bag',
+        phone_number='9876543210',
+        address='Main Road',
+        state='19-West Bengal',
+        email='akashbapibag9@gmail.com',
+        is_active=True
+    )
+    db.add(store)
+    db.commit()
+    print('==> Seeded Initial Store:', store.store_id)
+else:
+    print('==> Store already exists in DB.')
+db.close()
+"
+```
+
+### Step 7: Create Backend Systemd Service with Persistent Logging
+```bash
+# Create dedicated logging directory
+mkdir -p /var/log/saveshop
+chmod 755 /var/log/saveshop
+
+# Create backend systemd service file
+cat << 'EOF' > /etc/systemd/system/save-shop-backend.service
 [Unit]
 Description=Save Shop Backend FastAPI Application
 After=network.target postgresql.service
@@ -210,24 +269,23 @@ Type=simple
 User=root
 WorkingDirectory=/var/www/save-shop-backend
 EnvironmentFile=/etc/saveshop/backend.env
-ExecStart=/var/www/save-shop-backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 2
+ExecStart=/var/www/save-shop-backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 2 --access-log
 Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log/saveshop/backend.log
+StandardError=append:/var/log/saveshop/backend-error.log
 
 [Install]
 WantedBy=multi-user.target
-```
+EOF
 
-Enable and start backend:
-```bash
+# Reload systemd, enable and start service
 systemctl daemon-reload
 systemctl enable save-shop-backend
 systemctl start save-shop-backend
 ```
 
-### Step 7: Configure Nginx (Frontend & Reverse Proxy)
+### Step 8: Configure Nginx (Frontend SPA & API Reverse Proxy)
 Create `/etc/nginx/sites-available/saveshop`:
 ```nginx
 server {
@@ -285,7 +343,7 @@ server {
 }
 ```
 
-Enable Nginx site and test configuration:
+Enable site and restart Nginx:
 ```bash
 mkdir -p /var/www/save-shop-frontend/dist
 rm -f /etc/nginx/sites-enabled/default
@@ -295,21 +353,17 @@ systemctl restart nginx
 systemctl enable nginx
 ```
 
-### Step 8: Install Cloudflare Tunnel (`cloudflared`)
+### Step 9: Install Cloudflare Tunnel (`cloudflared`)
 ```bash
 # Download and install cloudflared
 curl -L --output /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
 chmod +x /usr/local/bin/cloudflared
 ```
 
----
-
-## 5. Auto-Startup & Recovery Watchdog (Server Reboot Protection)
-
-To guarantee that all services restart automatically if the server reboots due to high memory load, kernel updates, or hosting downtime, we have installed a resilient dual-layer watchdog system.
-
-### The Watchdog Script: `/usr/local/bin/saveshop-startup.sh`
+### Step 10: Auto-Startup & Recovery Watchdog Setup
+Create `/usr/local/bin/saveshop-startup.sh`:
 ```bash
+cat << 'EOF' > /usr/local/bin/saveshop-startup.sh
 #!/usr/bin/env bash
 LOG_FILE="/var/log/saveshop-startup.log"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Save Shop services check..." >> "$LOG_FILE"
@@ -354,144 +408,230 @@ else
 fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Save Shop healthcheck completed successfully." >> "$LOG_FILE"
+EOF
+chmod +x /usr/local/bin/saveshop-startup.sh
 ```
 
-### Registered Triggers:
-1. **Systemd Service**: `/etc/systemd/system/saveshop-startup.service` is `enabled` (`WantedBy=multi-user.target`).
-2. **Cron Watchdog**:
-   ```bash
-   */5 * * * * /usr/local/bin/saveshop-startup.sh >/dev/null 2>&1
-   @reboot /usr/local/bin/saveshop-startup.sh >/dev/null 2>&1
-   ```
+Create systemd watchdog service `/etc/systemd/system/saveshop-startup.service`:
+```ini
+[Unit]
+Description=Save Shop Auto-Startup & Recovery Watchdog
+After=network.target network-online.target postgresql.service nginx.service
+Wants=network-online.target postgresql.service nginx.service
 
----
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/saveshop-startup.sh
+RemainAfterExit=yes
 
-## 6. How to Update Environment Variables in Production
+[Install]
+WantedBy=multi-user.target
+```
 
-Never edit `.env` in Git repositories. To change backend or frontend configurations:
-
-### Updating Backend Environment Variables
-1. SSH into the server:
-   ```bash
-   ssh root@148.113.9.217 -p 20016
-   ```
-2. Edit `/etc/saveshop/backend.env`:
-   ```bash
-   nano /etc/saveshop/backend.env
-   ```
-3. Restart the backend service:
-   ```bash
-   systemctl restart save-shop-backend
-   ```
-4. Check that it started cleanly:
-   ```bash
-   systemctl status save-shop-backend
-   journalctl -u save-shop-backend -n 30 --no-pager
-   ```
-
-### Updating Frontend Environment Variables in GitHub CI/CD
-1. Go to GitHub: **Save-shop** repository > **Settings** > **Secrets and variables** > **Actions**.
-2. Update any of the encrypted repository secrets:
-   - `EXPO_PUBLIC_API_URL`
-   - `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`
-   - `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID`
-3. Trigger the deployment either by pushing a commit to `main` or going to **Actions** > **Test, Build and Deploy Save Shop Frontend to VPS** > **Run workflow**.
-
----
-
-## 7. Server Logging, Real-Time Debugging & Safe Log Cleanup
-
-All server application requests, error tracebacks, Nginx traffic, and recovery watchdog events are persistently logged to disk in standard Unix log directories with automated rotation and instant CLI tools.
-
-### Log File Locations
-
-| Component | Path on Server | Purpose |
-| :--- | :--- | :--- |
-| **Backend Live Requests** | `/var/log/saveshop/backend.log` | Every HTTP request (IP, timestamp, route, status code, latency) |
-| **Backend Error Stacktraces** | `/var/log/saveshop/backend-error.log` | Unhandled exceptions, 500 errors, database connection issues |
-| **Recovery Watchdog Log** | `/var/log/saveshop-startup.log` | Records every reboot and 5-min healthcheck recovery event |
-| **Nginx Access Log** | `/var/log/nginx/access.log` | Raw incoming HTTP/HTTPS requests hitting Nginx |
-| **Nginx Error Log** | `/var/log/nginx/error.log` | Bad gateway (502), upstream timeouts (504), routing errors |
-| **Cloudflare Tunnel Log** | `/var/log/cloudflared.log` | Outbound TLS tunnel health and public URL assignment |
-
----
-
-### Instant Log Viewer: `saveshop-logs` Utility
-
-A dedicated helper script has been placed at `/usr/local/bin/saveshop-logs` for fast debugging over SSH:
-
+Enable watchdog service and register crontab triggers:
 ```bash
-# 1. View live backend requests in real time (follows new incoming traffic)
+systemctl daemon-reload
+systemctl enable saveshop-startup.service
+
+# Add crontab triggers for @reboot and every 5 minutes
+(crontab -l 2>/dev/null; echo "*/5 * * * * /usr/local/bin/saveshop-startup.sh >/dev/null 2>&1"; echo "@reboot /usr/local/bin/saveshop-startup.sh >/dev/null 2>&1") | crontab -
+```
+
+### Step 11: Configure Automated Log Rotation & CLI Utility
+1. Create `/etc/logrotate.d/saveshop`:
+   ```bash
+   cat << 'EOF' > /etc/logrotate.d/saveshop
+   /var/log/saveshop/*.log {
+       daily
+       missingok
+       rotate 7
+       compress
+       delaycompress
+       notifempty
+       copytruncate
+   }
+   EOF
+   chmod 644 /etc/logrotate.d/saveshop
+   ```
+2. Install `saveshop-logs` utility at `/usr/local/bin/saveshop-logs`:
+   ```bash
+   cat << 'EOF' > /usr/local/bin/saveshop-logs
+   #!/usr/bin/env bash
+   LOG_DIR="/var/log/saveshop"
+   BACKEND_LOG="$LOG_DIR/backend.log"
+   BACKEND_ERR="$LOG_DIR/backend-error.log"
+   STARTUP_LOG="/var/log/saveshop-startup.log"
+   NGINX_ACCESS="/var/log/nginx/access.log"
+   NGINX_ERR="/var/log/nginx/error.log"
+
+   case "$1" in
+       error|err)
+           echo "=== Latest 50 Backend Errors ($BACKEND_ERR) ==="
+           tail -n 50 "$BACKEND_ERR" 2>/dev/null || echo "No error log yet."
+           ;;
+       nginx)
+           echo "=== Following Nginx Access & Error Logs (Ctrl+C to stop) ==="
+           tail -f "$NGINX_ACCESS" "$NGINX_ERR"
+           ;;
+       startup)
+           echo "=== Auto-Startup & Recovery Watchdog Log ($STARTUP_LOG) ==="
+           tail -n 40 "$STARTUP_LOG" 2>/dev/null || echo "No startup log yet."
+           ;;
+       status|size)
+           echo "=== Save Shop Log Files & Sizes ==="
+           ls -lh "$LOG_DIR"/ "$STARTUP_LOG" "$NGINX_ACCESS" "$NGINX_ERR" 2>/dev/null
+           ;;
+       clean|clear)
+           echo "=== Truncating / Cleaning Log Files ==="
+           truncate -s 0 "$BACKEND_LOG" 2>/dev/null
+           truncate -s 0 "$BACKEND_ERR" 2>/dev/null
+           truncate -s 0 "$STARTUP_LOG" 2>/dev/null
+           truncate -s 0 "$NGINX_ACCESS" 2>/dev/null
+           truncate -s 0 "$NGINX_ERR" 2>/dev/null
+           echo "Logs truncated successfully to 0 bytes. Disk space freed."
+           ls -lh "$LOG_DIR"/ "$STARTUP_LOG"
+           ;;
+       help|--help|-h)
+           echo "Usage: saveshop-logs [command]"
+           echo "  (no args) : Follow live backend application logs (realtime)"
+           echo "  error     : View latest 50 backend error stacktraces"
+           echo "  nginx     : Follow live Nginx requests and error logs"
+           echo "  startup   : View auto-recovery watchdog logs"
+           echo "  size      : Check disk space used by all log files"
+           echo "  clean     : Safely truncate all logs to 0 bytes"
+           ;;
+       *)
+           echo "=== Following Live Backend Logs ($BACKEND_LOG) [Ctrl+C to stop] ==="
+           touch "$BACKEND_LOG"
+           tail -f "$BACKEND_LOG"
+           ;;
+   esac
+   EOF
+   chmod 755 /usr/local/bin/saveshop-logs
+   ```
+
+### Step 12: GitHub Actions Automated CI/CD Key Generation & Secrets Setup
+To allow GitHub Actions to automatically run tests, build static web assets, and deploy via SSH/SCP:
+
+1. **Generate SSH Keypair**:
+   On your local machine (or the VPS), generate an ed25519 keypair:
+   ```bash
+   ssh-keygen -t ed25519 -C "github-actions-deploy" -f github_deploy_key
+   ```
+2. **Authorize Key on VPS**:
+   ```bash
+   mkdir -p /root/.ssh && chmod 700 /root/.ssh
+   cat github_deploy_key.pub >> /root/.ssh/authorized_keys
+   chmod 600 /root/.ssh/authorized_keys
+   ```
+3. **Configure Secrets in GitHub**:
+   - In **Save-shop-backend** (`Settings > Secrets and variables > Actions`):
+     - `VPS_HOST`: `148.113.9.217`
+     - `VPS_PORT`: `20016`
+     - `VPS_USER`: `root`
+     - `VPS_SSH_KEY`: Content of `github_deploy_key` (private key)
+   - In **Save-shop** (`Settings > Secrets and variables > Actions`):
+     - `VPS_HOST`: `148.113.9.217`
+     - `VPS_PORT`: `20016`
+     - `VPS_USER`: `root`
+     - `VPS_SSH_KEY`: Content of `github_deploy_key` (private key)
+     - `EXPO_PUBLIC_API_URL`: `https://chamber-golf-guardian-thumbnails.trycloudflare.com` (or your domain)
+     - `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`: `898498745806-g40fimuhq99o7aohltn4qqinpvog31d5.apps.googleusercontent.com`
+     - `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID`: `898498745806-gnrm36ifk3qoek9et2ej5o6ajrrc1bbm.apps.googleusercontent.com`
+
+### Step 13: Google Cloud OAuth 2.0 Credentials Setup
+In your [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
+1. Open your OAuth 2.0 Web Client ID.
+2. Under **Authorized JavaScript Origins**, add:
+   - `https://chamber-golf-guardian-thumbnails.trycloudflare.com` (or your permanent domain)
+   - `http://localhost:8081` (for local development)
+3. Under **Authorized Redirect URIs**, add:
+   - `https://chamber-golf-guardian-thumbnails.trycloudflare.com/`
+   - `https://auth.expo.io/@akashbapibag/save-shop`
+
+### Step 14: Swap Memory Configuration (LXC Container vs KVM VPS)
+- **On Proxmox / OpenVZ LXC Containers** (like this VPS):
+  The Linux kernel disables `swapon` inside unprivileged containers (`Operation not permitted`). The hosting provider or Proxmox host automatically assigns virtual swap (512MB active on this host).
+- **On Standard KVM / Dedicated VPS** (DigitalOcean, AWS, Linode, Hetzner):
+  Create a 2GB swap file:
+  ```bash
+  fallocate -l 2G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo "/swapfile none swap sw 0 0" >> /etc/fstab
+  ```
+
+### Step 15: Firewall Security (UFW) Configuration
+If you enable UFW firewall, **always allow your mapped SSH port first**:
+```bash
+# Allow mapped SSH port
+ufw allow 20016/tcp
+# Allow HTTP and HTTPS
+ufw allow 80/tcp
+ufw allow 443/tcp
+# Enable firewall safely
+ufw enable
+```
+
+### Step 16: Upgrading from Quick Tunnel to Permanent Custom Domain
+When you purchase a custom domain (e.g. `api.saveshop.com`):
+- **Option A (If public ports 80/443 are directly routed to the VPS)**:
+  Point your domain DNS A record to your VPS IP, then run:
+  ```bash
+  apt install -y certbot python3-certbot-nginx
+  certbot --nginx -d yourdomain.com
+  ```
+- **Option B (If still behind NAT / closed ports 80/443)**:
+  Use Cloudflare Named Tunnel:
+  ```bash
+  cloudflared tunnel login
+  cloudflared tunnel create saveshop-prod
+  cloudflared tunnel route dns saveshop-prod yourdomain.com
+  # Configure /etc/cloudflared/config.yml to proxy to http://127.0.0.1:80
+  cloudflared service install
+  ```
+
+---
+
+## 5. Server Logging, Real-Time Debugging & Safe Log Cleanup
+
+### Using `saveshop-logs`
+```bash
+# Follow live requests in real time:
 saveshop-logs
 
-# 2. View latest 50 backend error stacktraces (for fast bug inspection)
+# View latest 50 error stack traces:
 saveshop-logs error
 
-# 3. View live Nginx requests and errors
+# View Nginx access & error traffic:
 saveshop-logs nginx
 
-# 4. View auto-recovery watchdog status
-saveshop-logs startup
-
-# 5. Check disk space used by all log files
+# Check log sizes:
 saveshop-logs size
 
-# 6. Safely truncate all log files to 0 bytes (frees disk space without restarting services)
+# Safely truncate all logs to 0 bytes:
 saveshop-logs clean
 ```
 
----
-
-### Standard Linux Commands for Manual Log Inspection
-
-If you prefer standard shell commands:
+### Manual Log Inspection
 ```bash
-# Follow backend logs live:
+# Tail live backend log
 tail -f /var/log/saveshop/backend.log
 
-# Search for 500 Internal Server Errors in backend:
+# Search for 500 errors in backend
 grep " 500 " /var/log/saveshop/backend.log
 
-# Search for specific error messages or stack traces:
+# View last 100 lines of error log
 tail -n 100 /var/log/saveshop/backend-error.log
 
-# Follow Nginx proxy traffic:
+# View live Nginx requests
 tail -f /var/log/nginx/access.log /var/log/nginx/error.log
-
-# Check disk space used by all logs:
-ls -lh /var/log/saveshop/ /var/log/nginx/
 ```
 
 ---
 
-### How to Manually Clean Logs to Free Disk Space
-
-On a low-disk VPS, you can safely wipe logs at any time without stopping running services using `truncate`:
-```bash
-# Option A: One-click command via helper
-saveshop-logs clean
-
-# Option B: Manual truncate commands
-truncate -s 0 /var/log/saveshop/*.log
-truncate -s 0 /var/log/nginx/*.log
-truncate -s 0 /var/log/saveshop-startup.log
-```
-> [!NOTE]
-> Always use `truncate -s 0 <file>` instead of `rm <file>`. `truncate` clears the file contents in-place so running processes (Uvicorn, Nginx) do not lose their file descriptors.
-
----
-
-### Automated Log Rotation (`/etc/logrotate.d/saveshop`)
-
-To ensure the server disk **never fills up**, automated daily log rotation is active:
-- Rotates logs **daily**.
-- Keeps **7 days** of history.
-- Automatically **compresses** old logs (`.gz`).
-- Uses `copytruncate` to safely rotate active logs without service downtime.
-
----
-
-## 8. Crash & Emergency Management Commands
+## 6. Crash & Emergency Management Commands
 
 | Task | Command |
 | :--- | :--- |
