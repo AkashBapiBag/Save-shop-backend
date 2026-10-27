@@ -14,9 +14,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    PROJECT_NAME: str = "Save Shop Management System API"
+    PROJECT_NAME: str = "My Save Shop Management System API"
     VERSION: str = "1.0.0"
-    DESCRIPTION: str = "Definitive backend REST API for Save Shop Multi-Store Inventory & POS Billing"
+    DESCRIPTION: str = "Definitive backend REST API for My Save Shop Multi-Store Inventory & POS Billing"
     API_V1_STR: str = "/api/v1"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True

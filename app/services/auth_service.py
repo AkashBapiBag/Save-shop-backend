@@ -383,8 +383,6 @@ class AuthService:
                 if store not in user.accessible_stores:
                     user.accessible_stores.append(store)
                     assigned_stores.append(store)
-                if getattr(inv, "role", None) == "admin" and user.role != "admin":
-                    user.role = "admin"
                 if not user.current_store_id:
                     user.current_store_id = store.store_id
             inv.status = "accepted"

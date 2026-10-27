@@ -310,27 +310,28 @@ class StoreService:
         clean_email = email.strip().lower()
         from sqlalchemy import func
         from app.models.invitation import StoreInvitation
+        from app.core.config import settings
 
         # Check target role - Enforce that a store can only have 1 owner
-        target_role = (role or "user").strip().lower()
+        target_role = (role or "").strip().lower() if role else None
         if target_role == "owner":
-            raise ValidationException("A store can only have 1 owner. Additional staff can only be added as 'admin' or 'user'.")
+            raise ValidationException("A store can only have 1 owner. Additional staff or admin roles are determined by user database records.")
 
         target_owner_id = getattr(store, "owner_id", None)
 
-        # Check if user already exists
+        # Check if user already exists in DB
         user = db.query(User).filter(func.lower(User.email) == clean_email).first()
         if user:
-            if target_role == "admin" and user.role != "admin":
-                user.role = "admin"
-
+            # ROLE IS DECIDED BY DATABASE: If user is admin in DB, they are admin in every store.
+            # If user is staff in DB, they are staff. We do not alter user.role here.
             is_this_user_owner = bool(target_owner_id is not None and user.user_id == target_owner_id)
 
             # Check if user already has access to this store
             if store in user.accessible_stores:
+                role_desc = "owner" if is_this_user_owner else ("admin" if user.is_admin() else "staff")
                 return {
                     "status": "assigned",
-                    "message": f"User '{user.email}' is already an operator of {store.name}.",
+                    "message": f"User '{user.email}' is already an operator ({role_desc}) of {store.name}.",
                     "operator": {
                         "user_id": user.user_id,
                         "email": user.email,
@@ -363,9 +364,10 @@ class StoreService:
             db.commit()
             db.refresh(user)
 
+            role_desc = "owner" if is_this_user_owner else ("admin" if user.is_admin() else "staff")
             return {
                 "status": "assigned",
-                "message": f"User '{user.email}' successfully added to {store.name}.",
+                "message": f"User '{user.email}' successfully added to {store.name} as {role_desc}.",
                 "operator": {
                     "user_id": user.user_id,
                     "email": user.email,
@@ -379,6 +381,9 @@ class StoreService:
             }
 
         # User does not exist yet -> Create or reuse pending invitation
+        # Role is based on system admin status (ADMIN_EMAILS) or default "user"
+        invitation_role = "admin" if (clean_email in [e.lower() for e in settings.ADMIN_EMAILS] or target_role == "admin") else "user"
+
         existing_inv = (
             db.query(StoreInvitation)
             .filter(
@@ -389,9 +394,6 @@ class StoreService:
             .first()
         )
         if existing_inv:
-            if target_role and existing_inv.role != target_role:
-                existing_inv.role = target_role
-                db.commit()
             return {
                 "status": "invited",
                 "message": f"An active invitation for '{clean_email}' already exists. They will be added to {store.name} upon signing in.",
@@ -409,7 +411,7 @@ class StoreService:
         new_inv = StoreInvitation(
             store_id=store_id,
             email=clean_email,
-            role=target_role,
+            role=invitation_role,
             status="pending",
             invited_by_id=current_user.user_id,
         )

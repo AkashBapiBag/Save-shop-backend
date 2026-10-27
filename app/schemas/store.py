@@ -114,7 +114,7 @@ class StoreMembersOverviewResponse(BaseModel):
 
 class AddStoreOperatorRequest(BaseModel):
     email: EmailStr = Field(..., description="Email address of the user or operator to add")
-    role: str | None = Field("user", description="Role to assign (default: user)")
+    role: str | None = Field(None, description="Optional role override; role is determined by user record in DB")
 
 
 class AddStoreOperatorResponse(BaseModel):

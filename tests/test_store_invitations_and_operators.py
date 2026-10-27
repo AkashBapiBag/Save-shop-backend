@@ -257,25 +257,26 @@ def test_store_creator_owner_can_remove_added_admin_and_prevent_owner_removal(cl
     store_id = store["store_id"]
     assert store["owner_id"] == admin_a_id
 
-    # 2. Admin B logs in as another admin in the system
+    # 2. Admin B logs in as another admin in the system (their role in DB is admin)
     admin_b_resp = client.post(
         "/api/v1/auth/login",
-        json={"email": "operator_admin_b@saveshop.com", "name": "Akash 9 Admin", "role": "user"},
+        json={"email": "operator_admin_b@saveshop.com", "name": "Akash 9 Admin", "role": "admin"},
     )
     assert admin_b_resp.status_code == 200
     admin_b_data = admin_b_resp.json()
     admin_b_id = admin_b_data["user"]["user_id"]
     admin_b_headers = {"Authorization": f"Bearer {admin_b_data['access_token']}"}
 
-    # 3. Store owner (Admin A) adds Admin B to the store with role 'admin'
+    # 3. Store owner (Admin A) adds Admin B to the store by email (DB decides role: admin)
     add_b_resp = client.post(
         f"/api/v1/stores/{store_id}/operators",
-        json={"email": "operator_admin_b@saveshop.com", "role": "admin"},
+        json={"email": "operator_admin_b@saveshop.com"},
         headers=admin_a_headers,
     )
     assert add_b_resp.status_code == 200
     assert add_b_resp.json()["status"] == "assigned"
     assert add_b_resp.json()["operator"]["is_owner"] is False
+    assert add_b_resp.json()["operator"]["role"] == "admin"
 
     # 4. Check operators list
     ops_resp = client.get(f"/api/v1/stores/{store_id}/operators", headers=admin_a_headers)
@@ -400,6 +401,80 @@ def test_unassigned_admin_cannot_see_or_access_store(client: TestClient):
     # 5. Admin B attempts to switch context to Store A -> 403 Forbidden
     switch_attempt = client.post(f"/api/v1/auth/switch-store/{store_a_id}", headers=admin_b_headers)
     assert switch_attempt.status_code == 403
+
+
+def test_db_role_determines_store_operator_role_admin_and_staff(client: TestClient):
+    """
+    Validates logical constraint:
+    1. If user is admin in DB, adding them to any shop automatically makes them an admin in that shop.
+    2. If user is staff (user) in DB, adding them to any shop makes them staff.
+    3. A shop has strictly 1 owner, but can have multiple admins.
+    """
+    # 1. Store Owner creates store
+    owner_login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "shop_owner@saveshop.com", "name": "Store Owner", "role": "admin"},
+    )
+    owner_headers = {"Authorization": f"Bearer {owner_login.json()['access_token']}"}
+    create_resp = client.post(
+        "/api/v1/stores/create",
+        json={"name": "Role Test Mart", "phone_number": "+919876500000"},
+        headers=owner_headers,
+    )
+    store_id = create_resp.json()["store_id"]
+
+    # 2. In DB, User A is created as an admin
+    client.post(
+        "/api/v1/auth/login",
+        json={"email": "db_admin@saveshop.com", "name": "DB Admin", "role": "admin"},
+    )
+
+    # 3. In DB, User B is created as standard staff
+    client.post(
+        "/api/v1/auth/login",
+        json={"email": "db_staff@saveshop.com", "name": "DB Staff", "role": "user"},
+    )
+
+    # 4. Add User A by email (no role specified) -> DB decides they are 'admin'
+    add_a_resp = client.post(
+        f"/api/v1/stores/{store_id}/operators",
+        json={"email": "db_admin@saveshop.com"},
+        headers=owner_headers,
+    )
+    assert add_a_resp.status_code == 200
+    assert add_a_resp.json()["status"] == "assigned"
+    assert add_a_resp.json()["operator"]["role"] == "admin"
+    assert add_a_resp.json()["operator"]["is_owner"] is False
+
+    # 5. Add User B by email (no role specified) -> DB decides they are 'user'
+    add_b_resp = client.post(
+        f"/api/v1/stores/{store_id}/operators",
+        json={"email": "db_staff@saveshop.com"},
+        headers=owner_headers,
+    )
+    assert add_b_resp.status_code == 200
+    assert add_b_resp.json()["status"] == "assigned"
+    assert add_b_resp.json()["operator"]["role"] == "user"
+    assert add_b_resp.json()["operator"]["is_owner"] is False
+
+    # 6. Verify store operators overview has 1 owner, 1 admin, 1 staff
+    ops_resp = client.get(f"/api/v1/stores/{store_id}/operators", headers=owner_headers)
+    assert ops_resp.status_code == 200
+    operators = ops_resp.json()["operators"]
+    assert len(operators) == 3
+
+    owner_op = next(op for op in operators if op["email"] == "shop_owner@saveshop.com")
+    assert owner_op["is_owner"] is True
+    assert owner_op["role"] == "admin"
+
+    admin_op = next(op for op in operators if op["email"] == "db_admin@saveshop.com")
+    assert admin_op["is_owner"] is False
+    assert admin_op["role"] == "admin"
+
+    staff_op = next(op for op in operators if op["email"] == "db_staff@saveshop.com")
+    assert staff_op["is_owner"] is False
+    assert staff_op["role"] == "user"
+
 
 
 
