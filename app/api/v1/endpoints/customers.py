@@ -9,6 +9,8 @@ from app.models.user import User
 from app.schemas.customer import (
     CustomerCreate,
     CustomerHistoryResponse,
+    CustomerPaymentCreate,
+    CustomerPaymentResponse,
     CustomerResponse,
     CustomerUpdate,
 )
@@ -24,7 +26,8 @@ router = APIRouter(prefix="/customers", tags=["Store Customers Directory"])
 )
 def list_customers(
     search: str | None = Query(None, description="Search customers by name or phone number"),
-    sort_by: str = Query("recent", description="Sorting criteria: 'recent', 'name', 'orders', or 'spent'"),
+    sort_by: str = Query("recent", description="Sorting criteria: 'recent', 'name', 'orders', 'spent', or 'dues'"),
+    filter_dues: bool = Query(False, description="Filter to only customers with outstanding due balances"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     store_id: uuid.UUID = Depends(get_current_store_context),
@@ -33,13 +36,14 @@ def list_customers(
 ):
     """
     Returns the store's customer directory (phone book) with metrics like total purchases,
-    total amount spent, and last purchase date. Strictly isolated to active store tenant.
+    total amount spent, total dues, and last purchase date. Strictly isolated to active store tenant.
     """
     return CustomerService.list_customers(
         db=db,
         store_id=store_id,
         search=search,
         sort_by=sort_by,
+        filter_dues=filter_dues,
         limit=limit,
         offset=offset,
     )
@@ -79,7 +83,7 @@ def get_customer(
     db: Session = Depends(get_db),
 ):
     """
-    Retrieves full customer details including purchase statistics for the active store tenant.
+    Retrieves full customer details including purchase and due statistics for the active store tenant.
     """
     return CustomerService.get_customer_by_id(
         db=db,
@@ -102,7 +106,7 @@ def get_customer_history(
     db: Session = Depends(get_db),
 ):
     """
-    Retrieves all past transactions and invoices for a specific customer in this store.
+    Retrieves all past transactions, invoices, and payment settlements for a customer.
     """
     return CustomerService.get_customer_history(
         db=db,
@@ -110,6 +114,53 @@ def get_customer_history(
         store_id=store_id,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.post(
+    "/{customer_id}/payments",
+    response_model=CustomerPaymentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record Customer Due Clearance / Advance Payment",
+)
+def record_customer_payment(
+    customer_id: uuid.UUID,
+    payment_in: CustomerPaymentCreate,
+    store_id: uuid.UUID = Depends(get_current_store_context),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Records a payment made by a customer to clear outstanding dues or add advance store credit.
+    Automatically applies payment FIFO across oldest pending transactions.
+    """
+    return CustomerService.record_payment(
+        db=db,
+        store_id=store_id,
+        customer_id=customer_id,
+        payment_in=payment_in,
+        cashier=current_user,
+    )
+
+
+@router.get(
+    "/{customer_id}/payments",
+    response_model=list[CustomerPaymentResponse],
+    summary="List Customer Payment Settlement Receipts",
+)
+def list_customer_payments(
+    customer_id: uuid.UUID,
+    store_id: uuid.UUID = Depends(get_current_store_context),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieves all past settlement receipts for a specific customer in this store.
+    """
+    return CustomerService.list_customer_payments(
+        db=db,
+        store_id=store_id,
+        customer_id=customer_id,
     )
 
 

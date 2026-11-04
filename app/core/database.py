@@ -15,12 +15,12 @@ engine_kwargs = {
 if settings.DATABASE_URL.startswith("sqlite"):
     connect_args["check_same_thread"] = False
 else:
-    # High-concurrency production connection pool tuning for PostgreSQL
+    # High-concurrency production connection pool tuning for PostgreSQL & PgBouncer
     engine_kwargs.update({
-        "pool_size": 20,       # Persistent pool of active connections per uvicorn worker
-        "max_overflow": 10,    # Temporary surge connections during heavy traffic spikes
-        "pool_timeout": 10,    # Maximum seconds to wait for a free connection
-        "pool_recycle": 1800,  # Recycle connection after 30 mins to clean up RAM & OS resources
+        "pool_size": 40,       # Persistent pool of active connections per worker (80 total across 2 workers)
+        "max_overflow": 60,    # Surge buffer supporting up to 200 concurrent DB queries
+        "pool_timeout": 30,    # Generous timeout for high-concurrency peak traffic
+        "pool_recycle": 1800,  # Recycle connection after 30 mins
     })
 
 engine_kwargs["connect_args"] = connect_args
@@ -84,6 +84,7 @@ def init_db() -> None:
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS discount_type VARCHAR(20) DEFAULT 'percentage' NOT NULL;",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS cashback_value NUMERIC(12, 2) DEFAULT 0.00 NOT NULL;",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS cashback_type VARCHAR(20) DEFAULT 'percentage' NOT NULL;",
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS advance_balance NUMERIC(12, 2) DEFAULT 0.00 NOT NULL;",
     ]
 
     with engine.begin() as conn:

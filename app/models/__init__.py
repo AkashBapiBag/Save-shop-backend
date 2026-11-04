@@ -1,6 +1,6 @@
 from app.core.database import Base
 from app.models.base import GUID, TimestampMixin
-from app.models.customer import Customer, customer_stores
+from app.models.customer import Customer, CustomerPayment, customer_stores
 from app.models.inventory import Batch, Product, UnitEnum
 from app.models.invitation import StoreInvitation
 from app.models.notification import (
@@ -30,6 +30,7 @@ __all__ = [
     "Store",
     "StoreInvitation",
     "Customer",
+    "CustomerPayment",
     "customer_stores",
     "IndianState",
     "StockTransfer",

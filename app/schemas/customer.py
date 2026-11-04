@@ -34,9 +34,34 @@ class CustomerResponse(CustomerBase):
     updated_at: datetime
     total_orders: int = 0
     total_spent: Decimal = Decimal("0.00")
+    total_due: Decimal = Decimal("0.00")
+    advance_balance: Decimal = Decimal("0.00")
+    net_balance: Decimal = Decimal("0.00")
     last_order_date: datetime | None = None
     is_multi_store: bool = False
     store_ids: list[UUID] = Field(default_factory=list)
+
+
+class CustomerPaymentCreate(BaseModel):
+    amount: Decimal = Field(..., gt=Decimal("0.00"), description="Amount paid to settle due or add advance credit")
+    payment_method: str = Field("CASH", description="CASH, UPI, CARD, etc.")
+    notes: str | None = Field(None, description="Optional payment reference / note (e.g. UPI Ref, remarks)")
+    transaction_id: UUID | None = Field(None, description="Optional specific invoice ID to settle; defaults to FIFO.")
+
+
+class CustomerPaymentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    store_id: UUID
+    customer_id: UUID
+    cashier_id: UUID | None = None
+    cashier_name: str | None = None
+    payment_number: str
+    amount: Decimal
+    payment_method: str
+    notes: str | None = None
+    created_at: datetime
 
 
 class CustomerTransactionHistoryItem(BaseModel):
@@ -61,7 +86,11 @@ class CustomerHistoryResponse(BaseModel):
 
     customer: CustomerResponse
     transactions: list[CustomerTransactionHistoryItem]
+    payments: list[CustomerPaymentResponse] = Field(default_factory=list)
     total_orders: int = 0
     total_spent: Decimal = Decimal("0.00")
+    total_due: Decimal = Decimal("0.00")
+    advance_balance: Decimal = Decimal("0.00")
+    net_balance: Decimal = Decimal("0.00")
     all_stores_orders: int | None = None
     all_stores_spent: Decimal | None = None

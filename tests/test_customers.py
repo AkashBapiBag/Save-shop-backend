@@ -381,3 +381,151 @@ def test_customer_common_billing_across_two_stores(client: TestClient, admin_hea
     assert h2["all_stores_orders"] == 2
     assert float(h2["all_stores_spent"]) == 300.0
 
+
+def test_customer_dues_tracking_and_settlement_flow(client: TestClient, admin_headers: dict):
+    _, headers = setup_customer_test_store(client, admin_headers)
+
+    # 1. Create a customer
+    c_res = client.post(
+        "/api/v1/customers",
+        json={"name": "Subhash Chandra", "phone": "9830098300"},
+        headers=headers,
+    )
+    assert c_res.status_code == 201
+    cust = c_res.json()
+    cust_id = cust["customer_id"]
+    assert float(cust["total_due"]) == 0.0
+    assert float(cust["advance_balance"]) == 0.0
+
+    # 2. Add product & stock
+    p_res = client.post(
+        "/api/v1/inventory/products",
+        json={
+            "name": "Basmati Rice 1kg",
+            "category": "Grains",
+            "selling_price": "100.00",
+            "default_unit": "PIECE",
+        },
+        headers=headers,
+    )
+    assert p_res.status_code == 201
+    prod = p_res.json()
+
+    exp = (date.today() + timedelta(days=90)).isoformat()
+    client.post(
+        "/api/v1/inventory/batches/receive",
+        json={
+            "batches": [
+                {
+                    "product_id": prod["product_id"],
+                    "batch_identifier": "B-RICE-01",
+                    "purchase_price": "70.00",
+                    "initial_quantity": "50.000",
+                    "expiry_date": exp,
+                }
+            ]
+        },
+        headers=headers,
+    )
+
+    # 3. Bill 1: Final total = 100.00, Received = 60.00 (Due = 40.00)
+    tx1 = client.post(
+        "/api/v1/billing/checkout",
+        json={
+            "customer_id": cust_id,
+            "items": [{"product_id": prod["product_id"], "quantity": "1"}],
+            "payment_method": "CASH",
+            "received_amount": "60.00",
+        },
+        headers=headers,
+    )
+    assert tx1.status_code == 201
+    tx1_data = tx1.json()
+    assert float(tx1_data["balance_amount"]) == 40.0
+    assert tx1_data["payment_status"] == "PENDING"
+
+    # Customer total_due should now be 40.00
+    cust_check = client.get(f"/api/v1/customers/{cust_id}", headers=headers).json()
+    assert float(cust_check["total_due"]) == 40.0
+    assert float(cust_check["net_balance"]) == 40.0
+
+    # 4. Bill 2: Final total = 100.00, Paid on CREDIT (Due = 100.00)
+    tx2 = client.post(
+        "/api/v1/billing/checkout",
+        json={
+            "customer_id": cust_id,
+            "items": [{"product_id": prod["product_id"], "quantity": "1"}],
+            "payment_method": "CREDIT",
+        },
+        headers=headers,
+    )
+    assert tx2.status_code == 201
+    assert float(tx2.json()["balance_amount"]) == 100.0
+
+    # Customer total_due should now be 40 + 100 = 140.00
+    cust_check2 = client.get(f"/api/v1/customers/{cust_id}", headers=headers).json()
+    assert float(cust_check2["total_due"]) == 140.0
+
+    # Test filtering customers with dues
+    dues_list = client.get("/api/v1/customers?filter_dues=true", headers=headers).json()
+    assert len(dues_list) == 1
+    assert dues_list[0]["customer_id"] == cust_id
+    assert float(dues_list[0]["total_due"]) == 140.0
+
+    # 5. Record Payment 1: Customer pays 40.00 to settle first bill
+    pay1 = client.post(
+        f"/api/v1/customers/{cust_id}/payments",
+        json={"amount": "40.00", "payment_method": "UPI", "notes": "GPay ref #12345"},
+        headers=headers,
+    )
+    assert pay1.status_code == 201
+    pay1_data = pay1.json()
+    assert float(pay1_data["amount"]) == 40.0
+    assert pay1_data["payment_number"].startswith("PAY-")
+
+    # Due should now be 100.00 (tx1 fully cleared!)
+    cust_check3 = client.get(f"/api/v1/customers/{cust_id}", headers=headers).json()
+    assert float(cust_check3["total_due"]) == 100.0
+
+    # 6. Record Payment 2: Customer pays 120.00 (100.00 settles tx2, 20.00 becomes advance balance!)
+    pay2 = client.post(
+        f"/api/v1/customers/{cust_id}/payments",
+        json={"amount": "120.00", "payment_method": "CASH", "notes": "Settled in full + advance"},
+        headers=headers,
+    )
+    assert pay2.status_code == 201
+
+    cust_check4 = client.get(f"/api/v1/customers/{cust_id}", headers=headers).json()
+    assert float(cust_check4["total_due"]) == 0.0
+    assert float(cust_check4["advance_balance"]) == 20.0
+    assert float(cust_check4["net_balance"]) == -20.0
+
+    # Check history includes both transactions and both payments
+    hist = client.get(f"/api/v1/customers/{cust_id}/history", headers=headers).json()
+    assert len(hist["transactions"]) == 2
+    assert all(t["payment_status"] == "PAID" for t in hist["transactions"])
+    assert len(hist["payments"]) == 2
+    assert float(hist["advance_balance"]) == 20.0
+
+    # 7. Bill 3: Bill is 100.00. Customer uses 20.00 advance balance and pays 80.00 cash!
+    tx3 = client.post(
+        "/api/v1/billing/checkout",
+        json={
+            "customer_id": cust_id,
+            "items": [{"product_id": prod["product_id"], "quantity": "1"}],
+            "payment_method": "CASH",
+            "received_amount": "80.00",
+            "use_advance_balance": True,
+        },
+        headers=headers,
+    )
+    assert tx3.status_code == 201
+    assert tx3.json()["payment_status"] == "PAID"
+    assert float(tx3.json()["balance_amount"]) == 0.0
+
+    # Customer advance balance should now be 0.00, and dues remain 0.00
+    cust_check5 = client.get(f"/api/v1/customers/{cust_id}", headers=headers).json()
+    assert float(cust_check5["total_due"]) == 0.0
+    assert float(cust_check5["advance_balance"]) == 0.0
+
+

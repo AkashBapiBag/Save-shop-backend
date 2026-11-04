@@ -84,6 +84,14 @@ class POSTransactionCreate(BaseModel):
         True,
         description="Whether to allow selling even if inventory stock is insufficient or 0 (adjusted upon restock)",
     )
+    save_excess_as_advance: bool = Field(
+        False,
+        description="Whether to credit excess received amount as customer store advance credit",
+    )
+    use_advance_balance: bool = Field(
+        False,
+        description="Whether to apply available customer advance credit towards paying this bill",
+    )
 
 
 class BatchAllocationResponse(BaseModel):

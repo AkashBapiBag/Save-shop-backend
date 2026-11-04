@@ -518,6 +518,12 @@ class POSService:
         # -------------------------------------------------------------
         # STEP 6: Create and Save Transaction Record
         # -------------------------------------------------------------
+        customer_obj = (
+            db.query(Customer).filter(Customer.customer_id == customer_id_val).first()
+            if customer_id_val
+            else None
+        )
+
         # Determine received amount and balance
         if pos_in.received_amount is not None:
             received_amt = quantize_currency(Decimal(str(pos_in.received_amount)))
@@ -526,12 +532,39 @@ class POSService:
         else:
             received_amt = final_total
 
+        # Apply customer advance balance if requested
+        if getattr(pos_in, "use_advance_balance", False) and customer_obj:
+            curr_adv = Decimal(str(customer_obj.advance_balance or "0.00"))
+            if curr_adv > Decimal("0.00"):
+                adv_to_apply = min(curr_adv, max(Decimal("0.00"), final_total - received_amt))
+                customer_obj.advance_balance = quantize_currency(curr_adv - adv_to_apply)
+                received_amt = quantize_currency(received_amt + adv_to_apply)
+
         balance_amt = max(Decimal("0.00"), quantize_currency(final_total - received_amt))
+
+        # Enforce that walk-in customers cannot have any due or buy on credit
+        is_walk_in = (
+            (not pos_in.customer_id and not pos_in.customer_phone and (not customer_name_val or "walk-in" in customer_name_val.lower()))
+            or (customer_name_val and "walk-in" in customer_name_val.lower())
+        )
+        if is_walk_in and (pos_in.payment_method == PaymentMethod.CREDIT or balance_amt > Decimal("0.00")):
+            raise ValidationException(
+                "Walk-in customers cannot make purchases on credit or leave a pending balance due. Full payment is required."
+            )
+
         payment_status_val = (
             PaymentStatus.PENDING.value
             if (pos_in.payment_method == PaymentMethod.CREDIT or balance_amt > Decimal("0.00"))
             else PaymentStatus.PAID.value
         )
+
+        # Handle excess payment saved as customer advance credit
+        if received_amt > final_total:
+            excess = quantize_currency(received_amt - final_total)
+            if getattr(pos_in, "save_excess_as_advance", False) and customer_obj:
+                customer_obj.advance_balance = quantize_currency(
+                    Decimal(str(customer_obj.advance_balance or "0.00")) + excess
+                )
 
         invoice_seq, invoice_number = cls.generate_invoice_number(db, store_id)
         transaction = Transaction(

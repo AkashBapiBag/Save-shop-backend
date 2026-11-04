@@ -628,3 +628,48 @@ def test_pos_cashback_and_discount_calculated_from_stock_product(client: TestCli
     assert float(tx["total_cashback_amount"]) == 20.00
     assert float(tx["items"][0]["cashback_amount"]) == 20.00
     assert float(tx["items"][0]["cashback_pct"]) == 5.00
+
+
+def test_pos_walk_in_customer_cannot_buy_on_credit_or_have_dues(client: TestClient, admin_headers: dict):
+    """
+    Verifies that walk-in customers are not given credit options or permitted
+    to have pending dues. They must pay in full at checkout.
+    """
+    store_id, headers, p1, _ = setup_pos_test_environment(client, admin_headers)
+
+    # 1. Attempt checkout with CREDIT for walk-in customer -> 400
+    credit_payload = {
+        "store_id": store_id,
+        "customer_name": "Walk-in Customer",
+        "items": [{"product_id": p1["product_id"], "quantity": "1"}],
+        "payment_method": "CREDIT",
+    }
+    resp1 = client.post("/api/v1/billing/checkout", json=credit_payload, headers=headers)
+    assert resp1.status_code == 400
+    assert "Walk-in customers cannot make purchases on credit" in resp1.json()["error"]["message"]
+
+    # 2. Attempt checkout with partial payment for walk-in customer -> 400
+    partial_payload = {
+        "store_id": store_id,
+        "customer_name": "Walk-in Customer",
+        "items": [{"product_id": p1["product_id"], "quantity": "1"}],
+        "payment_method": "CASH",
+        "received_amount": "5.00",  # Total is 10.00
+    }
+    resp2 = client.post("/api/v1/billing/checkout", json=partial_payload, headers=headers)
+    assert resp2.status_code == 400
+    assert "Walk-in customers cannot make purchases on credit or leave a pending balance due" in resp2.json()["error"]["message"]
+
+    # 3. Full payment for walk-in customer -> 201 Success
+    full_payload = {
+        "store_id": store_id,
+        "customer_name": "Walk-in Customer",
+        "items": [{"product_id": p1["product_id"], "quantity": "1"}],
+        "payment_method": "CASH",
+        "received_amount": "10.00",
+    }
+    resp3 = client.post("/api/v1/billing/checkout", json=full_payload, headers=headers)
+    assert resp3.status_code == 201
+    assert resp3.json()["payment_status"] == "PAID"
+    assert float(resp3.json()["balance_amount"]) == 0.0
+
