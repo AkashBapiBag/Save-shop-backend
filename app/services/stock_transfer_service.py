@@ -35,6 +35,10 @@ class StockTransferService:
         return transfer_number
 
     @classmethod
+    def get_destination_stores(cls, db: Session) -> list[Store]:
+        return db.query(Store).filter(Store.is_active == True).order_by(Store.name.asc()).all()
+
+    @classmethod
     def create_transfer(
         cls,
         db: Session,
@@ -57,14 +61,13 @@ class StockTransferService:
         if not dest_store:
             raise EntityNotFoundException("Destination Store", dest_store_id)
 
-        # Enforce Admin or Connected Operator Authorization
-        # User must be an Admin or have authorized access to both stores
+        # Enforce Admin or Authorized Source Store Operator
+        # User must be an Admin or have authorized operator access to the source store
         is_admin_user = current_user.is_admin()
         has_source = is_admin_user or verify_user_store_access(db, current_user, source_store_id)
-        has_dest = is_admin_user or verify_user_store_access(db, current_user, dest_store_id)
 
-        if not has_source or not has_dest:
-            raise ForbiddenException("Only administrators or operators connected to both stores can perform stock transfers.")
+        if not has_source:
+            raise ForbiddenException("Only administrators or authorized operators of the source store can perform stock transfers.")
 
         if not transfer_in.items:
             raise ValidationException("At least one product item is required for stock transfer.")

@@ -422,3 +422,66 @@ def test_stock_transfer_history_inward_outward_filters(client: TestClient, admin
     header_inward_resp = client.get("/api/v1/inventory/transfers?direction=inward", headers=h_s2).json()
     assert len(header_inward_resp) == 1
     assert header_inward_resp[0]["source_store_name"] == "Central Hub"
+
+
+def test_store_operator_stock_transfer_permission(client: TestClient, admin_headers: dict):
+    # 1. Create two stores
+    s1 = client.post("/api/v1/stores/create", json={"name": "Operator Store A"}, headers=admin_headers).json()["store_id"]
+    s2 = client.post("/api/v1/stores/create", json={"name": "Operator Store B"}, headers=admin_headers).json()["store_id"]
+
+    # 2. Create product in Store A with stock
+    prod_resp = client.post(
+        "/api/v1/inventory/products",
+        json={"name": "Operator Product", "category": "Snacks", "default_unit": "PIECE", "selling_price": "50.00"},
+        headers={**admin_headers, "X-Store-Id": s1},
+    )
+    prod_id = prod_resp.json()["product_id"]
+    client.post(
+        "/api/v1/inventory/receive/single",
+        json={"product_id": prod_id, "batch_identifier": "OP-BATCH-1", "quantity": "20.000", "purchase_price": "30.00", "purchase_date": date.today().isoformat(), "expiry_date": (date.today() + timedelta(days=60)).isoformat()},
+        headers={**admin_headers, "X-Store-Id": s1},
+    )
+
+    # 3. Create operator user (role="user") and assign only to Store A
+    op_login = client.post("/api/v1/auth/login", json={"email": "operator_sam@saveshop.com", "name": "Operator Sam", "role": "user"})
+    assert op_login.status_code == 200
+    op_headers = {"Authorization": f"Bearer {op_login.json()['access_token']}"}
+
+    assign_resp = client.post(f"/api/v1/stores/{s1}/operators", json={"email": "operator_sam@saveshop.com"}, headers=admin_headers)
+    assert assign_resp.status_code == 200
+
+    # 4. Check destinations endpoint accessible to operator
+    dests = client.get("/api/v1/inventory/transfers/destinations", headers=op_headers)
+    assert dests.status_code == 200
+    dest_names = [d["name"] for d in dests.json()]
+    assert "Operator Store A" in dest_names
+    assert "Operator Store B" in dest_names
+
+    # 5. Operator transfers stock from assigned Store A to Store B -> SUCCESS
+    trf_resp = client.post(
+        "/api/v1/inventory/transfers",
+        json={
+            "source_store_id": s1,
+            "destination_store_id": s2,
+            "notes": "Transfer by store operator",
+            "items": [{"product_id": prod_id, "quantity": "5.000"}],
+        },
+        headers=op_headers,
+    )
+    assert trf_resp.status_code == 201
+    assert trf_resp.json()["source_store_name"] == "Operator Store A"
+    assert trf_resp.json()["destination_store_name"] == "Operator Store B"
+    assert float(trf_resp.json()["total_quantity"]) == 5.0
+
+    # 6. Operator attempts to transfer FROM Store B (which they are NOT assigned to) -> 403 Forbidden
+    unauth_trf = client.post(
+        "/api/v1/inventory/transfers",
+        json={
+            "source_store_id": s2,
+            "destination_store_id": s1,
+            "notes": "Unauthorized transfer",
+            "items": [{"product_id": prod_id, "quantity": "1.000"}],
+        },
+        headers=op_headers,
+    )
+    assert unauth_trf.status_code == 403

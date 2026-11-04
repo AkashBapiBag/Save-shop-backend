@@ -7,7 +7,9 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_active_user
 from app.models.user import User
 from app.schemas.stock_transfer import StockTransferCreate, StockTransferResponse
+from app.schemas.store import StoreResponse
 from app.services.stock_transfer_service import StockTransferService
+from app.services.store_service import StoreService
 
 router = APIRouter(prefix="/inventory/transfers", tags=["Stock Transfers & Inter-Store Inward/Outward"])
 
@@ -76,6 +78,23 @@ def list_stock_transfers(
         offset=offset,
     )
     return [StockTransferService.to_response(t) for t in transfers]
+
+
+@router.get(
+    "/destinations",
+    response_model=list[StoreResponse],
+    summary="List Active Stores for Stock Transfer Destinations",
+)
+def list_transfer_destination_stores(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns active stores available as transfer destinations.
+    Accessible to administrators and authorized store operators.
+    """
+    stores = StockTransferService.get_destination_stores(db)
+    return [StoreService.to_response(s) for s in stores]
 
 
 @router.get(
