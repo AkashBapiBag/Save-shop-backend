@@ -191,12 +191,13 @@ def test_pos_3_tier_discounts_calculation(client: TestClient, admin_headers: dic
 def test_pos_insufficient_stock_rollback(client: TestClient, admin_headers: dict):
     store_id, headers, p1, _ = setup_pos_test_environment(client, admin_headers)
 
-    # Product 1 only has 15 total units in stock. Attempting to purchase 100 should fail.
+    # When allow_negative_stock=False, attempting to purchase 100 with only 15 units should fail.
     resp = client.post(
         "/api/v1/billing/checkout",
         json={
             "store_id": store_id,
             "items": [{"product_id": p1["product_id"], "quantity": "100.000"}],
+            "allow_negative_stock": False,
         },
         headers=headers,
     )
@@ -206,6 +207,59 @@ def test_pos_insufficient_stock_rollback(client: TestClient, admin_headers: dict
     # Confirm stock was not deducted (still 15)
     prod = client.get(f"/api/v1/inventory/products/{p1['product_id']}", headers=headers).json()
     assert float(prod["total_current_stock"]) == 15.0
+
+
+def test_pos_negative_stock_allowed_and_restock_adjustment(client: TestClient, admin_headers: dict):
+    """
+    Tests that:
+    1. POS billing allows checkout even when stock is insufficient (default allow_negative_stock=True).
+    2. Over-purchased items drive product stock into negative values (-5 units).
+    3. At the time of restock, the incoming batch quantity adjusts/settles the negative stock overdraft.
+    """
+    store_id, headers, p1, _ = setup_pos_test_environment(client, admin_headers)
+    # p1 initially has 15 units across 2 batches (5 in EARLY, 10 in LATE)
+    today = date.today()
+
+    # Purchase 20 units (5 more than the 15 available)
+    resp = client.post(
+        "/api/v1/billing/checkout",
+        json={
+            "store_id": store_id,
+            "items": [{"product_id": p1["product_id"], "quantity": "20.000"}],
+            "payment_method": "CASH",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["invoice_number"].startswith("INV-")
+
+    # Product stock should now be negative 5 (-5.000)
+    prod = client.get(f"/api/v1/inventory/products/{p1['product_id']}", headers=headers).json()
+    assert float(prod["total_current_stock"]) == -5.0
+
+    # Restock with a new batch of 12 units
+    # -5 deficit should be settled to 0, and the new batch should have 7 available units (-5 + 12 = 7)
+    restock_resp = client.post(
+        "/api/v1/inventory/receive/single",
+        json={
+            "product_id": p1["product_id"],
+            "batch_identifier": "BATCH-RESTOCK-01",
+            "quantity": "12.000",
+            "purchase_price": "10.00",
+            "purchase_date": today.isoformat(),
+            "expiry_date": (today + timedelta(days=90)).isoformat(),
+        },
+        headers=headers,
+    )
+    assert restock_resp.status_code == 201
+    new_batch_data = restock_resp.json()
+    assert float(new_batch_data["initial_quantity"]) == 12.0
+    assert float(new_batch_data["current_quantity"]) == 7.0
+
+    # Total stock should now be exactly 7.000
+    prod_after = client.get(f"/api/v1/inventory/products/{p1['product_id']}", headers=headers).json()
+    assert float(prod_after["total_current_stock"]) == 7.0
 
 
 def test_pos_structured_receipt_endpoint(client: TestClient, admin_headers: dict):
@@ -441,3 +495,136 @@ def test_pos_incremental_unique_invoice_numbering(client: TestClient, admin_head
     receipt = receipt_resp.json()
     assert receipt["invoice_seq"] == 2
     assert receipt["invoice_number"] == "INV-00002"
+
+
+def test_pos_discount_calculated_from_stock_product(client: TestClient, admin_headers: dict):
+    """
+    Verifies that during POS billing, discount is automatically calculated
+    from the product in stock (no manual discount input required from cashier).
+    """
+    s_resp = client.post("/api/v1/stores/create", json={"name": "Auto Disc Store"}, headers=admin_headers)
+    store_id = s_resp.json()["store_id"]
+    headers = {**admin_headers, "X-Store-Id": store_id}
+
+    # 1. Product with 10% discount in stock
+    p = client.post(
+        "/api/v1/inventory/products",
+        json={
+            "name": "Tea Pack",
+            "category": "Beverages",
+            "default_unit": "PACKET",
+            "selling_price": "100.00",
+            "discount_value": "10.00",
+            "discount_type": "percentage",
+        },
+        headers=headers,
+    ).json()
+
+    # Receive stock
+    today = date.today()
+    client.post(
+        "/api/v1/inventory/receive/single",
+        json={
+            "product_id": p["product_id"],
+            "batch_identifier": "LOT-TEA-1",
+            "quantity": "20.000",
+            "purchase_price": "60.00",
+            "purchase_date": today.isoformat(),
+            "expiry_date": (today + timedelta(days=90)).isoformat(),
+        },
+        headers=headers,
+    )
+
+    # 2. Checkout: cashier specifies NO manual subtotal discount
+    checkout_payload = {
+        "store_id": store_id,
+        "items": [
+            {
+                "product_id": p["product_id"],
+                "quantity": "2.000",
+            }
+        ],
+        "payment_method": "CASH",
+    }
+
+    resp = client.post("/api/v1/billing/checkout", json=checkout_payload, headers=headers)
+    assert resp.status_code == 201
+    tx = resp.json()
+
+    # Subtotal: 2 * 100 = 200.00
+    assert float(tx["subtotal"]) == 200.00
+    # Automatically calculated discount from stock product: 10% of 200 = 20.00
+    assert float(tx["item_discount_amount"]) == 20.00
+    # Final total: 200 - 20 = 180.00
+    assert float(tx["final_total"]) == 180.00
+    assert float(tx["you_saved_amount"]) == 20.00
+    assert float(tx["items"][0]["discount_amount"]) == 20.00
+    assert float(tx["items"][0]["line_total"]) == 180.00
+
+
+def test_pos_cashback_and_discount_calculated_from_stock_product(client: TestClient, admin_headers: dict):
+    """
+    Verifies that during POS billing, both discount AND cashback are automatically
+    calculated from the product in stock without requiring any manual calculation or input.
+    """
+    s_resp = client.post("/api/v1/stores/create", json={"name": "Auto Disc & CB Store"}, headers=admin_headers)
+    store_id = s_resp.json()["store_id"]
+    headers = {**admin_headers, "X-Store-Id": store_id}
+
+    # 1. Product with 10% discount and 5% cashback in stock
+    p = client.post(
+        "/api/v1/inventory/products",
+        json={
+            "name": "Organic Honey",
+            "category": "Groceries",
+            "default_unit": "BOTTLE",
+            "selling_price": "200.00",
+            "discount_value": "10.00",
+            "discount_type": "percentage",
+            "cashback_value": "5.00",
+            "cashback_type": "percentage",
+        },
+        headers=headers,
+    ).json()
+
+    # Receive stock
+    today = date.today()
+    client.post(
+        "/api/v1/inventory/receive/single",
+        json={
+            "product_id": p["product_id"],
+            "batch_identifier": "LOT-HONEY-1",
+            "quantity": "50.000",
+            "purchase_price": "120.00",
+            "purchase_date": today.isoformat(),
+            "expiry_date": (today + timedelta(days=180)).isoformat(),
+        },
+        headers=headers,
+    )
+
+    # 2. Checkout: cashier specifies NO manual discount and NO manual cashback
+    checkout_payload = {
+        "store_id": store_id,
+        "items": [
+            {
+                "product_id": p["product_id"],
+                "quantity": "2.000",
+            }
+        ],
+        "payment_method": "UPI",
+    }
+
+    resp = client.post("/api/v1/billing/checkout", json=checkout_payload, headers=headers)
+    assert resp.status_code == 201
+    tx = resp.json()
+
+    # Subtotal: 2 * 200 = 400.00
+    assert float(tx["subtotal"]) == 400.00
+    # Automatically calculated discount from stock product: 10% of 400 = 40.00
+    assert float(tx["item_discount_amount"]) == 40.00
+    # Final total: 400 - 40 = 360.00
+    assert float(tx["final_total"]) == 360.00
+    # Automatically calculated cashback from stock product: 5% of 400 = 20.00
+    assert float(tx["total_cashback_amount"]) == 20.00
+    assert float(tx["items"][0]["cashback_amount"]) == 20.00
+    assert float(tx["items"][0]["cashback_pct"]) == 5.00

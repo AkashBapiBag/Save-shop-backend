@@ -21,6 +21,13 @@ from app.schemas.common import (
     PaginatedResponse,
     PaginationMeta,
 )
+from app.schemas.customer import (
+    CustomerCreate,
+    CustomerHistoryResponse,
+    CustomerResponse,
+    CustomerTransactionHistoryItem,
+    CustomerUpdate,
+)
 from app.schemas.dashboard import (
     DashboardOverviewResponse,
     InventoryStatusResponse,
@@ -58,6 +65,11 @@ __all__ = [
     "StoreCreate",
     "StoreUpdate",
     "StoreResponse",
+    "CustomerCreate",
+    "CustomerUpdate",
+    "CustomerResponse",
+    "CustomerTransactionHistoryItem",
+    "CustomerHistoryResponse",
     "SignatureUploadRequest",
     "SignatureResponse",
     "ProductCreate",

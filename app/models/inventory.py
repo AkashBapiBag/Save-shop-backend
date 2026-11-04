@@ -40,6 +40,10 @@ class Product(Base, TimestampMixin):
     cost_price = Column(Numeric(12, 2), default=0.00, nullable=False)
     min_stock_alert_threshold = Column(Numeric(12, 3), default=10.000, nullable=False)
     barcode = Column(String(100), index=True, nullable=True)
+    discount_value = Column(Numeric(12, 2), default=0.00, nullable=False)
+    discount_type = Column(String(20), default="percentage", nullable=False)
+    cashback_value = Column(Numeric(12, 2), default=0.00, nullable=False)
+    cashback_type = Column(String(20), default="percentage", nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
 
     # Relationships

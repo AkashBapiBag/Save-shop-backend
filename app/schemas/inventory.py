@@ -20,6 +20,10 @@ class ProductBase(BaseModel):
         description="Minimum inventory count before low stock alert is triggered",
     )
     barcode: str | None = Field(None, max_length=100, description="UPC/EAN or Barcode string")
+    discount_value: Decimal = Field(Decimal("0.00"), ge=Decimal("0.00"), description="Preset discount value on product")
+    discount_type: str = Field("percentage", description="Discount calculation mode: 'percentage' or 'amount'")
+    cashback_value: Decimal = Field(Decimal("0.00"), ge=Decimal("0.00"), description="Preset cashback value on product")
+    cashback_type: str = Field("percentage", description="Cashback calculation mode: 'percentage' or 'amount'")
 
 
 class ProductCreate(ProductBase):
@@ -28,12 +32,18 @@ class ProductCreate(ProductBase):
 
 class ProductUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
-    description: str | None = None
     category: str | None = Field(None, min_length=1, max_length=100)
+    min_stock_alert_threshold: Decimal | None = Field(None, ge=Decimal("0.000"))
+    discount_value: Decimal | None = Field(None, ge=Decimal("0.00"))
+    discount_type: str | None = Field(None, description="'percentage' or 'amount'")
+    cashback_value: Decimal | None = Field(None, ge=Decimal("0.00"))
+    cashback_type: str | None = Field(None, description="'percentage' or 'amount'")
+
+    # Optional fields for backward compatibility
+    description: str | None = None
     default_unit: UnitEnum | None = None
     selling_price: Decimal | None = Field(None, gt=Decimal("0.00"))
     cost_price: Decimal | None = Field(None, ge=Decimal("0.00"))
-    min_stock_alert_threshold: Decimal | None = Field(None, ge=Decimal("0.000"))
     barcode: str | None = Field(None, max_length=100)
     is_active: bool | None = None
 

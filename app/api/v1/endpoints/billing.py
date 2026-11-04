@@ -62,7 +62,7 @@ def validate_cart_stock(
     Checks active non-depleted stock for items in the cart in real-time.
     Returns whether stock is sufficient and any item-specific discrepancies.
     """
-    return POSService.validate_cart_stock(db=db, store_id=store_id, items=req.items)
+    return POSService.validate_cart_stock(db=db, store_id=store_id, items=req.items, allow_negative=req.allow_negative)
 
 
 @router.post(

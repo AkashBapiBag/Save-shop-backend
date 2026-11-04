@@ -101,6 +101,93 @@ class POSService:
         if not store:
             raise EntityNotFoundException("Store", store_id)
 
+        # Customer resolution
+        customer_id_val = None
+        customer_name_val = pos_in.customer_name
+        customer_phone_val = pos_in.customer_phone
+        customer_email_val = pos_in.customer_email
+
+        if pos_in.customer_id:
+            from sqlalchemy import or_
+
+            from app.models.customer import Customer, customer_stores
+            from app.services.customer_service import CustomerService
+
+            cust = (
+                db.query(Customer)
+                .outerjoin(customer_stores, Customer.customer_id == customer_stores.c.customer_id)
+                .filter(
+                    Customer.customer_id == pos_in.customer_id,
+                    or_(Customer.store_id == store_id, customer_stores.c.store_id == store_id),
+                )
+                .first()
+            )
+            if not cust:
+                # If customer was registered in another store, auto-link to this store so billing won't break
+                cust = db.query(Customer).filter(Customer.customer_id == pos_in.customer_id).first()
+                if not cust:
+                    raise EntityNotFoundException("Customer in store", pos_in.customer_id)
+                CustomerService.link_customer_to_store(db, cust.customer_id, store_id)
+
+            customer_id_val = cust.customer_id
+            if not customer_name_val:
+                customer_name_val = cust.name
+            if not customer_phone_val:
+                customer_phone_val = cust.phone
+            if not customer_email_val:
+                customer_email_val = cust.email
+        elif customer_name_val and customer_name_val.strip().lower() not in [
+            "walk-in customer",
+            "walk in customer",
+            "walk-in",
+            "walk in",
+            "guest",
+        ]:
+            from sqlalchemy import or_
+
+            from app.models.customer import Customer, customer_stores
+            from app.services.customer_service import CustomerService
+
+            clean_cust_name = customer_name_val.strip()
+            clean_cust_phone = customer_phone_val.strip() if customer_phone_val and customer_phone_val.strip() else None
+
+            existing_cust = None
+            if clean_cust_phone:
+                existing_cust = (
+                    db.query(Customer)
+                    .outerjoin(customer_stores, Customer.customer_id == customer_stores.c.customer_id)
+                    .filter(
+                        Customer.phone == clean_cust_phone,
+                        or_(Customer.store_id == store_id, customer_stores.c.store_id == store_id),
+                    )
+                    .first()
+                )
+            if not existing_cust:
+                existing_cust = (
+                    db.query(Customer)
+                    .outerjoin(customer_stores, Customer.customer_id == customer_stores.c.customer_id)
+                    .filter(
+                        Customer.name == clean_cust_name,
+                        or_(Customer.store_id == store_id, customer_stores.c.store_id == store_id),
+                    )
+                    .first()
+                )
+
+            if existing_cust:
+                customer_id_val = existing_cust.customer_id
+            else:
+                new_cust = Customer(
+                    customer_id=uuid.uuid4(),
+                    store_id=store_id,
+                    name=clean_cust_name,
+                    phone=clean_cust_phone,
+                )
+                db.add(new_cust)
+                db.commit()
+                db.refresh(new_cust)
+                CustomerService.link_customer_to_store(db, new_cust.customer_id, store_id)
+                customer_id_val = new_cust.customer_id
+
         # Idempotency check for offline transactions (scoped to active store tenant)
         if pos_in.client_offline_id:
             existing = (
@@ -176,10 +263,24 @@ class POSService:
                 line_base = quantize_currency(deduction_qty * base_product_price)
                 unit_price = quantize_currency(line_base / qty) if qty > Decimal("0.000") else base_product_price
 
-            # 2. Product-level Cashback (Amount or Percentage)
+            # 2. Product-level Cashback (calculated from stock product inventory or line item)
+            prod_cb_val = Decimal(str(getattr(product, "cashback_value", Decimal("0.00")) or Decimal("0.00")))
+            prod_cb_type = getattr(product, "cashback_type", "percentage") or "percentage"
+
             cashback_amt = Decimal("0.00")
             cashback_pct = Decimal("0.00")
-            if item_in.cashback_pct and item_in.cashback_pct > Decimal("0.00"):
+
+            if prod_cb_val > Decimal("0.00"):
+                if prod_cb_type == "percentage":
+                    cashback_pct = min(Decimal("100.00"), max(Decimal("0.00"), prod_cb_val))
+                    cashback_amt = quantize_currency(line_base * (cashback_pct / Decimal("100")))
+                else:
+                    unit_cb = min(unit_price, prod_cb_val)
+                    cashback_amt = min(line_base, quantize_currency(deduction_qty * unit_cb))
+                    cashback_pct = (
+                        quantize_currency((cashback_amt / line_base) * Decimal("100")) if line_base > Decimal("0.00") else Decimal("0.00")
+                    )
+            elif item_in.cashback_pct and item_in.cashback_pct > Decimal("0.00"):
                 cashback_pct = min(Decimal("100.00"), max(Decimal("0.00"), Decimal(str(item_in.cashback_pct))))
                 cashback_amt = quantize_currency(line_base * (cashback_pct / Decimal("100")))
             elif item_in.cashback_amount and item_in.cashback_amount > Decimal("0.00"):
@@ -188,9 +289,27 @@ class POSService:
                     quantize_currency(cashback_amt / line_base * Decimal("100")) if line_base > Decimal("0.00") else Decimal("0.00")
                 )
 
-            # 3. Item-level and Category-level discounts (if provided)
-            item_disc_pct = Decimal(str(item_in.item_discount_pct or 0))
-            item_disc_amt = quantize_currency(line_base * (item_disc_pct / Decimal("100")))
+            # 3. Item-level and Category-level discounts (calculated as per stock / product)
+            prod_disc_val = Decimal(str(getattr(product, "discount_value", Decimal("0.00")) or Decimal("0.00")))
+            prod_disc_type = getattr(product, "discount_type", "percentage") or "percentage"
+
+            if prod_disc_val > Decimal("0.00"):
+                if prod_disc_type == "percentage":
+                    item_disc_pct = min(Decimal("100.00"), max(Decimal("0.00"), prod_disc_val))
+                    item_disc_amt = quantize_currency(line_base * (item_disc_pct / Decimal("100")))
+                else:
+                    unit_disc = min(unit_price, prod_disc_val)
+                    item_disc_amt = min(line_base, quantize_currency(deduction_qty * unit_disc))
+                    item_disc_pct = (
+                        quantize_currency((item_disc_amt / line_base) * Decimal("100")) if line_base > Decimal("0.00") else Decimal("0.00")
+                    )
+            elif item_in.item_discount_pct and item_in.item_discount_pct > Decimal("0.00"):
+                item_disc_pct = Decimal(str(item_in.item_discount_pct or 0))
+                item_disc_amt = quantize_currency(line_base * (item_disc_pct / Decimal("100")))
+            else:
+                item_disc_pct = Decimal("0.00")
+                item_disc_amt = Decimal("0.00")
+
             price_after_item_disc = max(Decimal("0.00"), line_base - item_disc_amt)
 
             category_key = (product.category or "General").strip().lower()
@@ -289,7 +408,8 @@ class POSService:
             )
 
             total_available = sum((b.current_quantity for b in batches), Decimal("0.000"))
-            if total_available < req_qty:
+            allow_negative = getattr(pos_in, "allow_negative_stock", True)
+            if not allow_negative and total_available < req_qty:
                 raise InsufficientStockException(
                     product_name=product.name,
                     product_id=product.product_id,
@@ -317,7 +437,7 @@ class POSService:
                 line_total=item_data["line_total"],
             )
 
-            # Deduct in FEFO order across batches
+            # Deduct in FEFO order across positive batches
             remaining_to_deduct = req_qty
             for batch in batches:
                 if remaining_to_deduct <= Decimal("0.000"):
@@ -339,8 +459,57 @@ class POSService:
                 )
                 tx_item.allocations.append(allocation)
 
+            # If positive stock was insufficient and allow_negative is True, deduct remaining into negative stock
+            if remaining_to_deduct > Decimal("0.000"):
+                target_batch = (
+                    db.query(Batch)
+                    .filter(
+                        Batch.product_id == product.product_id,
+                        Batch.store_id == store_id,
+                    )
+                    .order_by(Batch.expiry_date.desc(), Batch.purchase_date.desc(), Batch.created_at.desc())
+                    .first()
+                )
+                if not target_batch:
+                    target_batch = Batch(
+                        batch_id=uuid.uuid4(),
+                        product_id=product.product_id,
+                        store_id=store_id,
+                        batch_identifier="BATCH-DEFAULT",
+                        initial_quantity=Decimal("0.000"),
+                        current_quantity=Decimal("0.000"),
+                        purchase_price=product.cost_price,
+                        purchase_date=date.today(),
+                        expiry_date=date.today() + timedelta(days=365),
+                    )
+                    db.add(target_batch)
+                    db.flush()
+
+                target_batch.current_quantity = quantize_quantity(target_batch.current_quantity - remaining_to_deduct)
+
+                existing_alloc = next((a for a in tx_item.allocations if a.batch_id == target_batch.batch_id), None)
+                if existing_alloc:
+                    existing_alloc.quantity_deducted = quantize_quantity(existing_alloc.quantity_deducted + remaining_to_deduct)
+                else:
+                    allocation = TransactionBatchAllocation(
+                        allocation_id=uuid.uuid4(),
+                        transaction_item_id=tx_item.item_id,
+                        batch_id=target_batch.batch_id,
+                        product_id=product.product_id,
+                        quantity_deducted=remaining_to_deduct,
+                        batch_identifier=target_batch.batch_identifier,
+                        expiry_date=target_batch.expiry_date,
+                    )
+                    tx_item.allocations.append(allocation)
+
+                remaining_to_deduct = Decimal("0.000")
+
             # Check if remaining stock for this product triggers low stock alert
-            remaining_total_stock = total_available - req_qty
+            remaining_total_stock = (
+                db.query(func.coalesce(func.sum(Batch.current_quantity), Decimal("0.000")))
+                .filter(Batch.product_id == product.product_id, Batch.store_id == store_id)
+                .scalar()
+            ) or Decimal("0.000")
             if remaining_total_stock <= product.min_stock_alert_threshold:
                 low_stock_alerts_to_send.append((product, remaining_total_stock))
 
@@ -371,9 +540,10 @@ class POSService:
             invoice_seq=invoice_seq,
             invoice_number=invoice_number,
             cashier_id=cashier.user_id if cashier else None,
-            customer_name=pos_in.customer_name,
-            customer_phone=pos_in.customer_phone,
-            customer_email=pos_in.customer_email,
+            customer_id=customer_id_val,
+            customer_name=customer_name_val,
+            customer_phone=customer_phone_val,
+            customer_email=customer_email_val,
             subtotal=accumulated_subtotal,
             item_discount_amount=accumulated_item_discount,
             category_discount_amount=accumulated_cat_discount,
@@ -409,7 +579,13 @@ class POSService:
         return transaction
 
     @classmethod
-    def validate_cart_stock(cls, db: Session, store_id: uuid.UUID, items: list[StockValidationItem]) -> StockValidationResponse:
+    def validate_cart_stock(
+        cls,
+        db: Session,
+        store_id: uuid.UUID,
+        items: list[StockValidationItem],
+        allow_negative: bool = False,
+    ) -> StockValidationResponse:
         """
         Validates inventory stock for a set of items in real-time before proceeding to checkout.
         """
@@ -461,7 +637,7 @@ class POSService:
                 .all()
             )
             available = sum((b.current_quantity for b in batches), Decimal("0.000"))
-            if available < deduction_qty:
+            if not allow_negative and available < deduction_qty:
                 errors.append(
                     StockValidationItemError(
                         product_id=product.product_id,
@@ -715,6 +891,7 @@ class POSService:
             invoice_number=tx.invoice_number,
             invoice_seq=getattr(tx, "invoice_seq", None),
             transaction_id=tx.transaction_id,
+            customer_id=getattr(tx, "customer_id", None),
             date=tx.created_at,
             cashier_name=tx.cashier.name if tx.cashier else "Store Staff",
             customer_name=tx.customer_name or "Walk-in Customer",
@@ -793,6 +970,7 @@ class POSService:
             invoice_seq=getattr(tx, "invoice_seq", None),
             cashier_id=tx.cashier_id,
             cashier_name=tx.cashier.name if tx.cashier else None,
+            customer_id=getattr(tx, "customer_id", None),
             customer_name=tx.customer_name,
             customer_phone=tx.customer_phone,
             customer_email=tx.customer_email,

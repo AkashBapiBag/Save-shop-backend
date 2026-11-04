@@ -39,6 +39,7 @@ class Transaction(Base, TimestampMixin):
     cashier_id = Column(GUID(), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True)
 
     # Customer info
+    customer_id = Column(GUID(), ForeignKey("customers.customer_id", ondelete="SET NULL"), nullable=True, index=True)
     customer_name = Column(String(255), nullable=True)
     customer_phone = Column(String(50), nullable=True)
     customer_email = Column(String(255), nullable=True)
@@ -66,6 +67,7 @@ class Transaction(Base, TimestampMixin):
     # Relationships
     store = relationship("Store", back_populates="transactions")
     cashier = relationship("User", back_populates="transactions")
+    customer = relationship("Customer", back_populates="transactions")
     items = relationship(
         "TransactionItem",
         back_populates="transaction",

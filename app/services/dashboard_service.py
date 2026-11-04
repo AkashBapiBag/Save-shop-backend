@@ -87,7 +87,7 @@ class DashboardService:
         )
         low_stock_count = 0
         for p in products:
-            total_stock = sum((b.current_quantity for b in p.batches if b.current_quantity > 0), Decimal("0.000"))
+            total_stock = sum((b.current_quantity for b in p.batches), Decimal("0.000"))
             if total_stock <= p.min_stock_alert_threshold:
                 low_stock_count += 1
 
@@ -296,7 +296,7 @@ class DashboardService:
         low_stock_items: list[LowStockAlertItem] = []
 
         for p in products:
-            curr_stock = sum((b.current_quantity for b in p.batches if b.current_quantity > 0), Decimal("0.000"))
+            curr_stock = sum((b.current_quantity for b in p.batches), Decimal("0.000"))
             if curr_stock <= Decimal("0.000"):
                 out_of_stock_count += 1
                 low_stock_items.append(

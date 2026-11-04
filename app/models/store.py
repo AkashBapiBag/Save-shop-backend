@@ -40,3 +40,4 @@ class Store(Base, TimestampMixin):
     batches = relationship("Batch", back_populates="store", cascade="all, delete-orphan")
     transactions = relationship("Transaction", back_populates="store")
     invitations = relationship("StoreInvitation", back_populates="store", cascade="all, delete-orphan")
+    customers = relationship("Customer", secondary="customer_stores", back_populates="stores")

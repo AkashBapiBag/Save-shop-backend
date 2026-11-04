@@ -309,8 +309,9 @@ class StoreService:
         store = StoreService.get_store_by_id(db, store_id)
         clean_email = email.strip().lower()
         from sqlalchemy import func
-        from app.models.invitation import StoreInvitation
+
         from app.core.config import settings
+        from app.models.invitation import StoreInvitation
 
         # Check target role - Enforce that a store can only have 1 owner
         target_role = (role or "").strip().lower() if role else None

@@ -45,6 +45,7 @@ class CategoryDiscountRule(BaseModel):
 
 class POSTransactionCreate(BaseModel):
     store_id: UUID | None = Field(None, description="Store ID. Defaults to active user store.")
+    customer_id: UUID | None = Field(None, description="Optional registered Customer ID")
     items: list[POSItemInput] = Field(..., min_length=1, description="List of cart items")
     category_discounts: list[CategoryDiscountRule] | None = Field(
         default=None,
@@ -78,6 +79,10 @@ class POSTransactionCreate(BaseModel):
     client_offline_id: str | None = Field(
         None,
         description="Idempotency key for offline transactions captured while mobile device was disconnected",
+    )
+    allow_negative_stock: bool = Field(
+        True,
+        description="Whether to allow selling even if inventory stock is insufficient or 0 (adjusted upon restock)",
     )
 
 
@@ -122,6 +127,7 @@ class TransactionResponse(BaseModel):
     invoice_seq: int | None = None
     cashier_id: UUID | None = None
     cashier_name: str | None = None
+    customer_id: UUID | None = None
     customer_name: str | None = None
     customer_phone: str | None = None
     customer_email: str | None = None
@@ -171,6 +177,7 @@ class ReceiptResponse(BaseModel):
     invoice_number: str
     invoice_seq: int | None = None
     transaction_id: UUID
+    customer_id: UUID | None = None
     date: datetime
     cashier_name: str | None = "Store Operator"
     customer_name: str | None = "Walk-in Customer"
@@ -200,6 +207,7 @@ class StockValidationItem(BaseModel):
 
 class StockValidationRequest(BaseModel):
     items: list[StockValidationItem] = Field(..., min_length=1)
+    allow_negative: bool = Field(False, description="Whether negative stock is permitted during validation")
 
 
 class StockValidationItemError(BaseModel):

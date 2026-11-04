@@ -66,12 +66,13 @@ def test_pos_offline_sync_batch_with_idempotency_and_failures(client: TestClient
                 "items": [{"product_id": prod_id, "quantity": "2.000"}],
                 "payment_method": "CASH",
             },
-            # Tx 2: Excess stock request (attempt to buy 50 bars when only 8 remain)
+            # Tx 2: Excess stock request with allow_negative_stock=False (attempt to buy 50 bars when only 8 remain)
             {
                 "store_id": store_id,
                 "client_offline_id": offline_id_2,
                 "items": [{"product_id": prod_id, "quantity": "50.000"}],
                 "payment_method": "CASH",
+                "allow_negative_stock": False,
             },
         ],
     }

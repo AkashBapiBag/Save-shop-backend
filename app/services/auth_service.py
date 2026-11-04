@@ -362,6 +362,7 @@ class AuthService:
         If user has no current_store_id, sets it to the first assigned store.
         """
         from sqlalchemy import func
+
         from app.models.invitation import StoreInvitation
 
         pending_invites = (

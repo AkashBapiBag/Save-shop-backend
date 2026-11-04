@@ -1,6 +1,6 @@
 import uuid
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -16,6 +16,12 @@ from app.schemas.inventory import (
     ProductResponse,
     ProductUpdate,
 )
+
+THREE_PLACES = Decimal("0.001")
+
+
+def quantize_quantity(qty: Decimal) -> Decimal:
+    return qty.quantize(THREE_PLACES, rounding=ROUND_HALF_UP)
 
 
 class InventoryService:
@@ -36,6 +42,10 @@ class InventoryService:
             cost_price=product_in.cost_price,
             min_stock_alert_threshold=product_in.min_stock_alert_threshold,
             barcode=product_in.barcode,
+            discount_value=getattr(product_in, "discount_value", Decimal("0.00")) or Decimal("0.00"),
+            discount_type=getattr(product_in, "discount_type", "percentage") or "percentage",
+            cashback_value=getattr(product_in, "cashback_value", Decimal("0.00")) or Decimal("0.00"),
+            cashback_type=getattr(product_in, "cashback_type", "percentage") or "percentage",
             is_active=True,
         )
         db.add(product)
@@ -76,6 +86,14 @@ class InventoryService:
             product.cost_price = product_in.cost_price
         if product_in.min_stock_alert_threshold is not None:
             product.min_stock_alert_threshold = product_in.min_stock_alert_threshold
+        if getattr(product_in, "discount_value", None) is not None:
+            product.discount_value = product_in.discount_value
+        if getattr(product_in, "discount_type", None) is not None:
+            product.discount_type = product_in.discount_type
+        if getattr(product_in, "cashback_value", None) is not None:
+            product.cashback_value = product_in.cashback_value
+        if getattr(product_in, "cashback_type", None) is not None:
+            product.cashback_type = product_in.cashback_type
         if product_in.barcode is not None:
             product.barcode = product_in.barcode
         if product_in.is_active is not None:
@@ -102,7 +120,7 @@ class InventoryService:
                 Batch.product_id,
                 func.coalesce(func.sum(Batch.current_quantity), Decimal("0.000")).label("total_stock"),
             )
-            .filter(Batch.store_id == store_id, Batch.current_quantity > 0)
+            .filter(Batch.store_id == store_id)
             .group_by(Batch.product_id)
             .subquery()
         )
@@ -151,6 +169,7 @@ class InventoryService:
     ) -> Batch:
         """
         Atomic operation 1: Single batch stock acquisition.
+        Reconciles any existing negative stock overdrafts before allocating remaining positive stock.
         """
         product = (
             db.query(Product)
@@ -163,13 +182,34 @@ class InventoryService:
         if not product:
             raise EntityNotFoundException("Product in store", receive_in.product_id)
 
+        remaining_qty = quantize_quantity(Decimal(str(receive_in.quantity)))
+
+        # Find existing negative batches for this product in this store
+        negative_batches = (
+            db.query(Batch)
+            .filter(
+                Batch.product_id == receive_in.product_id,
+                Batch.store_id == store_id,
+                Batch.current_quantity < Decimal("0.000"),
+            )
+            .order_by(Batch.created_at.asc())
+            .all()
+        )
+        for neg_b in negative_batches:
+            if remaining_qty <= Decimal("0.000"):
+                break
+            deficit = abs(neg_b.current_quantity)
+            covered = min(remaining_qty, deficit)
+            neg_b.current_quantity = quantize_quantity(neg_b.current_quantity + covered)
+            remaining_qty = quantize_quantity(remaining_qty - covered)
+
         new_batch = Batch(
             batch_id=uuid.uuid4(),
             product_id=receive_in.product_id,
             store_id=store_id,
             batch_identifier=receive_in.batch_identifier,
             initial_quantity=receive_in.quantity,
-            current_quantity=receive_in.quantity,  # Source of truth
+            current_quantity=remaining_qty,  # Source of truth (reconciled after clearing negative stock)
             purchase_price=receive_in.purchase_price,
             purchase_date=receive_in.purchase_date,
             expiry_date=receive_in.expiry_date,
@@ -188,6 +228,7 @@ class InventoryService:
         """
         Atomic operation 2: Bulk receiving of multiple batches across products.
         Enforces transaction atomicity: either all batches succeed or none are committed.
+        Reconciles negative stock overdrafts across all products atomically.
         """
         store = db.query(Store).filter(Store.store_id == store_id).first()
         if not store:
@@ -208,13 +249,34 @@ class InventoryService:
                 if not product:
                     raise EntityNotFoundException(f"Product {item.product_id} in store", store_id)
 
+                remaining_qty = quantize_quantity(Decimal(str(item.quantity)))
+
+                # Find existing negative batches for this product in this store
+                negative_batches = (
+                    db.query(Batch)
+                    .filter(
+                        Batch.product_id == item.product_id,
+                        Batch.store_id == store_id,
+                        Batch.current_quantity < Decimal("0.000"),
+                    )
+                    .order_by(Batch.created_at.asc())
+                    .all()
+                )
+                for neg_b in negative_batches:
+                    if remaining_qty <= Decimal("0.000"):
+                        break
+                    deficit = abs(neg_b.current_quantity)
+                    covered = min(remaining_qty, deficit)
+                    neg_b.current_quantity = quantize_quantity(neg_b.current_quantity + covered)
+                    remaining_qty = quantize_quantity(remaining_qty - covered)
+
                 batch = Batch(
                     batch_id=uuid.uuid4(),
                     product_id=item.product_id,
                     store_id=store_id,
                     batch_identifier=item.batch_identifier,
                     initial_quantity=item.quantity,
-                    current_quantity=item.quantity,
+                    current_quantity=remaining_qty,
                     purchase_price=item.purchase_price or product.cost_price,
                     purchase_date=item.purchase_date,
                     expiry_date=item.expiry_date,
@@ -278,7 +340,7 @@ class InventoryService:
     def to_product_response(product: Product, total_stock: Decimal | None = None) -> ProductResponse:
         if total_stock is None:
             total_stock = sum(
-                (b.current_quantity for b in product.batches if b.current_quantity > 0),
+                (b.current_quantity for b in product.batches),
                 Decimal("0.000"),
             )
         batch_responses = [InventoryService.to_batch_response(b) for b in product.batches]
@@ -293,6 +355,10 @@ class InventoryService:
             cost_price=product.cost_price,
             min_stock_alert_threshold=product.min_stock_alert_threshold,
             barcode=product.barcode,
+            discount_value=getattr(product, "discount_value", Decimal("0.00")) or Decimal("0.00"),
+            discount_type=getattr(product, "discount_type", "percentage") or "percentage",
+            cashback_value=getattr(product, "cashback_value", Decimal("0.00")) or Decimal("0.00"),
+            cashback_type=getattr(product, "cashback_type", "percentage") or "percentage",
             total_current_stock=total_stock,
             is_active=product.is_active,
             created_at=product.created_at,

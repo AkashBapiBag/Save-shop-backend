@@ -63,6 +63,7 @@ def init_db() -> None:
 
     is_sqlite = settings.DATABASE_URL.startswith("sqlite")
     owner_col_def = "owner_id CHAR(36)" if is_sqlite else "owner_id UUID"
+    customer_col_def = "customer_id CHAR(36)" if is_sqlite else "customer_id UUID"
 
     # Safe migration for new columns on existing database
     migrations = [
@@ -78,6 +79,11 @@ def init_db() -> None:
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS invoice_seq INTEGER;",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub VARCHAR(255);",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS picture_url VARCHAR(500);",
+        f"ALTER TABLE transactions ADD COLUMN IF NOT EXISTS {customer_col_def};",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS discount_value NUMERIC(12, 2) DEFAULT 0.00 NOT NULL;",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS discount_type VARCHAR(20) DEFAULT 'percentage' NOT NULL;",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS cashback_value NUMERIC(12, 2) DEFAULT 0.00 NOT NULL;",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS cashback_type VARCHAR(20) DEFAULT 'percentage' NOT NULL;",
     ]
 
     with engine.begin() as conn:
@@ -106,6 +112,47 @@ def init_db() -> None:
             conn.execute(
                 text("CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_store_invoice_num ON transactions (store_id, invoice_number);")
             )
+            if not is_sqlite:
+                # Drop legacy global unique index on invoice_number to support per-store sequential invoicing
+                conn.execute(text("DROP INDEX IF EXISTS ix_transactions_invoice_number;"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_transactions_invoice_number ON transactions (invoice_number);"))
+        except Exception:
+            pass
+
+        try:
+            if is_sqlite:
+                conn.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS customer_stores ("
+                        "customer_id CHAR(36) NOT NULL, "
+                        "store_id CHAR(36) NOT NULL, "
+                        "PRIMARY KEY (customer_id, store_id)"
+                        ");"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "INSERT OR IGNORE INTO customer_stores (customer_id, store_id) "
+                        "SELECT customer_id, store_id FROM customers WHERE store_id IS NOT NULL;"
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS customer_stores ("
+                        "customer_id UUID NOT NULL, "
+                        "store_id UUID NOT NULL, "
+                        "PRIMARY KEY (customer_id, store_id)"
+                        ");"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO customer_stores (customer_id, store_id) "
+                        "SELECT customer_id, store_id FROM customers WHERE store_id IS NOT NULL "
+                        "ON CONFLICT DO NOTHING;"
+                    )
+                )
         except Exception:
             pass
 
