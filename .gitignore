@@ -1,4 +1,8 @@
 .env
 ./env
+.env.staging
+.env.production
+__pycache__/
+*.pyc
 DEPLOYMENT_GUIDE.md
 *deployment*guide*.md

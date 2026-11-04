@@ -71,5 +71,19 @@ class Settings(BaseSettings):
         domain = info.data.get("AUTH0_DOMAIN", "saveshop.us.auth0.com")
         return f"https://{domain}/"
 
+    @field_validator("CORS_ORIGINS", "ADMIN_EMAILS", "GOOGLE_ALLOWED_CLIENT_IDS", mode="before")
+    @classmethod
+    def assemble_list_fields(cls, v):
+        if isinstance(v, str):
+            v_trimmed = v.strip()
+            if v_trimmed.startswith("[") and v_trimmed.endswith("]"):
+                import json
+                try:
+                    return json.loads(v_trimmed)
+                except Exception:
+                    pass
+            return [item.strip() for item in v_trimmed.split(",") if item.strip()]
+        return v
+
 
 settings = Settings()
