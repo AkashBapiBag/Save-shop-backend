@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, ForeignKey, Index, Numeric, String, Table, Text
+from sqlalchemy import Column, ForeignKey, Index, Numeric, String, Table, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -18,6 +18,7 @@ customer_stores = Table(
 class Customer(Base, TimestampMixin):
     __tablename__ = "customers"
     __table_args__ = (
+        UniqueConstraint("store_id", "phone", name="uq_customers_store_phone"),
         Index("ix_customers_store_name", "store_id", "name"),
         Index("ix_customers_store_phone", "store_id", "phone"),
     )

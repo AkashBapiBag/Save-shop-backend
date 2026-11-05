@@ -217,7 +217,7 @@ class CustomerService:
         clean_phone = customer_in.phone.strip() if customer_in.phone and customer_in.phone.strip() else None
 
         if clean_phone:
-            # Check for existing customer with same phone in THIS store: reuse and proceed
+            # Check for existing customer with same phone in THIS store: strictly restrict duplicates
             existing_in_store = (
                 db.query(Customer)
                 .outerjoin(customer_stores, Customer.customer_id == customer_stores.c.customer_id)
@@ -228,7 +228,10 @@ class CustomerService:
                 .first()
             )
             if existing_in_store:
-                return cls.get_customer_by_id(db, existing_in_store.customer_id, store_id)
+                raise ValidationException(
+                    f"A customer with mobile number '{clean_phone}' already exists in this store ({existing_in_store.name}). "
+                    f"Multiple customers with the same mobile number are not allowed in the same store."
+                )
 
             # Check if customer exists in ANOTHER store: link to this store and proceed
             existing_global = db.query(Customer).filter(Customer.phone == clean_phone).first()

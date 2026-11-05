@@ -54,7 +54,7 @@ def test_customer_creation_with_and_without_phone(client: TestClient, admin_head
     assert c2["notes"] == "Prefers paper bag"
 
 
-def test_existing_customer_proceeds_without_error(client: TestClient, admin_headers: dict):
+def test_duplicate_customer_phone_in_same_store_is_restricted(client: TestClient, admin_headers: dict):
     _, headers = setup_customer_test_store(client, admin_headers)
 
     res1 = client.post(
@@ -62,19 +62,18 @@ def test_existing_customer_proceeds_without_error(client: TestClient, admin_head
         json={"name": "Customer One", "phone": "9123456789"},
         headers=headers,
     )
-    assert res1.status_code in [200, 201]
+    assert res1.status_code == 201
     c1 = res1.json()
+    assert c1["phone"] == "9123456789"
 
-    # When user is already saved in the database, cool to proceed with existing customer
+    # Within the same store, multiple customers with the same mobile number are strictly NOT allowed
     res2 = client.post(
         "/api/v1/customers",
-        json={"name": "Customer One", "phone": "9123456789"},
+        json={"name": "Customer Two", "phone": "9123456789"},
         headers=headers,
     )
-    assert res2.status_code in [200, 201]
-    c2 = res2.json()
-    assert c2["customer_id"] == c1["customer_id"]
-    assert c2["phone"] == "9123456789"
+    assert res2.status_code == 400
+    assert "already exists in this store" in res2.json()["error"]["message"]
 
 
 def test_customer_search_and_sort(client: TestClient, admin_headers: dict):
@@ -273,14 +272,14 @@ def test_customer_common_between_two_stores(client: TestClient, admin_headers: d
     assert list2[0]["customer_id"] == c1["customer_id"]
     assert list2[0]["is_multi_store"] is True
 
-    # 4. Adding same phone again returns existing customer without error
+    # 4. Adding same phone again in Store 2 is rejected because within Store 2, phone must be unique
     res_dup = client.post(
         "/api/v1/customers",
         json={"name": "Subhash Chandra Bose", "phone": "9831098310"},
         headers=headers2,
     )
-    assert res_dup.status_code in [200, 201]
-    assert res_dup.json()["customer_id"] == c1["customer_id"]
+    assert res_dup.status_code == 400
+    assert "already exists in this store" in res_dup.json()["error"]["message"]
 
 
 def test_customer_common_billing_across_two_stores(client: TestClient, admin_headers: dict):
